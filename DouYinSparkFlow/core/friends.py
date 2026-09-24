@@ -275,6 +275,52 @@ async def _wait_for_chat_or_login(page, timeout_seconds=FRIEND_LIST_READY_TIMEOU
     )
 
 
+# The friend list page renders four .ReactVirtualized__Grid elements; only one of
+# them is the friend list (clientHeight 679, scrollHeight ~10000), and it is not
+# the first in document order. Selecting by selector order picked a collapsed
+# 0x0 grid, so friends.py rejected every candidate ("no scroll container", scan
+# returned the 14 first-screen names) and tasks.py scrolled the dead grid until
+# its idle timeout. Pick by measurement instead: the tallest scrollable element
+# that actually contains friend rows.
+_FRIEND_SCROLLER_JS = """
+() => {
+  const seen = new Set();
+  const cands = [];
+  for (const sel of ['.ReactVirtualized__Grid', '[role="grid"]',
+                     '[class*="semi-list"] ul', 'ul > div']) {
+    for (const e of document.querySelectorAll(sel)) {
+      if (!seen.has(e)) { seen.add(e); cands.push(e); }
+    }
+  }
+  let best = null;
+  for (const e of cands) {
+    if (e.clientHeight > 40
+        && e.scrollHeight > e.clientHeight + 20
+        && e.querySelectorAll('[class*="item-header-name-"]').length > 0
+        && (!best || e.scrollHeight > best.scrollHeight)) {
+      best = e;
+    }
+  }
+  return best;
+}
+"""
+
+
+async def resolve_friend_scroller(page):
+    """Return the real friend-list scroll container, or None."""
+    try:
+        handle = await page.evaluate_handle(_FRIEND_SCROLLER_JS)
+    except Exception:
+        return None
+    element = handle.as_element() if handle else None
+    if element is None and handle is not None:
+        try:
+            await handle.dispose()
+        except Exception:
+            pass
+    return element
+
+
 async def collect_friend_names(page, on_progress=None):
     await _wait_for_chat_or_login(page)
     await _click_friends_tab(page)
@@ -329,7 +375,11 @@ async def collect_friend_names(page, on_progress=None):
 
         scrollable_element = None
         scrollable_selector = ""
-        for selector in SCROLLABLE_FRIENDS_SELECTORS:
+        measured = await resolve_friend_scroller(page)
+        if measured is not None:
+            scrollable_element = measured
+            scrollable_selector = "measured"
+        for selector in () if scrollable_element else SCROLLABLE_FRIENDS_SELECTORS:
             try:
                 candidate = page.locator(selector).first
                 handle = await candidate.element_handle()

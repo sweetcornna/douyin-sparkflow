@@ -1420,6 +1420,15 @@ async def _extract_friend_record(element):
 
 
 async def _first_scrollable_friends_element(page, selectors):
+    # Prefer the measured container over selector order; see resolve_friend_scroller.
+    try:
+        from core.friends import resolve_friend_scroller
+
+        measured = await resolve_friend_scroller(page)
+    except Exception:
+        measured = None
+    if measured is not None:
+        return "measured", measured
     for selector in selectors:
         try:
             handle = await page.locator(selector).first.element_handle()
