@@ -15,6 +15,7 @@ ARG https_proxy
 ARG all_proxy
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+ARG APT_MIRROR=mirrors.aliyun.com
 
 ENV HTTP_PROXY=${HTTP_PROXY}
 ENV HTTPS_PROXY=${HTTPS_PROXY}
@@ -30,8 +31,8 @@ ENV PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST}
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list \
-    && sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list \
+RUN sed -i "s/archive.ubuntu.com/${APT_MIRROR}/g" /etc/apt/sources.list \
+    && sed -i "s/security.ubuntu.com/${APT_MIRROR}/g" /etc/apt/sources.list \
     && ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo ${TZ} > /etc/timezone \
     && apt-get update && apt-get install -y \

@@ -153,6 +153,14 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("node --version", dockerfile)
         self.assertNotIn("github.com/docker/compose", dockerfile)
 
+    def test_apt_mirror_is_a_build_argument(self):
+        dockerfile = (SOURCE_ROOT / "Dockerfile.server").read_text(encoding="utf-8")
+        compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn("ARG APT_MIRROR=mirrors.aliyun.com", dockerfile)
+        self.assertIn('"s/archive.ubuntu.com/${APT_MIRROR}/g"', dockerfile)
+        self.assertIn('"s/security.ubuntu.com/${APT_MIRROR}/g"', dockerfile)
+        self.assertIn("APT_MIRROR: ${APT_MIRROR:-mirrors.aliyun.com}", compose)
+
     def test_docker_build_context_excludes_runtime_data(self):
         dockerignore = (SOURCE_ROOT / ".dockerignore").read_text(encoding="utf-8")
         for entry in ("logs/", "config.json", "usersData.json", "webui_settings.json"):
