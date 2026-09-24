@@ -580,6 +580,28 @@ class StreakTargetIdentityTests(unittest.TestCase):
 
         self.assertEqual("sent_unverified", state["status"])
 
+    def test_mark_failed_replaces_previous_day_sent_unverified(self):
+        account = {"username": "demo", "targets": ["Alice"]}
+        streak_state.mark_sent_unverified(
+            account,
+            "Alice",
+            run_id="run-1",
+            strategy="browser",
+            now=NOW - timedelta(days=1),
+        )
+
+        state = streak_state.mark_failed(
+            account,
+            "Alice",
+            category="browser_timeout",
+            reason="timeout",
+            retryable=True,
+            now=NOW,
+        )
+
+        self.assertEqual("failed_retryable", state["status"])
+        self.assertEqual("browser_timeout", state["lastErrorCategory"])
+
     def test_stale_failure_does_not_override_newer_terminal_failure(self):
         account = {"username": "demo", "targets": ["Alice"]}
         streak_state.mark_failed(
@@ -695,6 +717,40 @@ class StreakTargetIdentityTests(unittest.TestCase):
         self.assertEqual("sec:sec-1", target_ref)
         self.assertEqual(
             "sent_unverified",
+            account["target_states"]["sec:sec-1"]["status"],
+        )
+
+    def test_stable_key_upgrade_prefers_failure_from_a_later_local_day(self):
+        local_tz = timezone(timedelta(hours=8))
+        sent_at = datetime(2026, 9, 14, 23, 30, tzinfo=local_tz)
+        failed_at = datetime(2026, 9, 15, 0, 30, tzinfo=local_tz)
+        account = {
+            "username": "demo",
+            "targets": ["Alice"],
+            "target_refs": {"Alice": "nickname:alice"},
+            "protocol_targets_cache": [
+                {"nickname": "Alice", "secUid": "sec-1"}
+            ],
+            "target_states": {
+                "nickname:alice": {
+                    "targetRef": "nickname:alice",
+                    "displayName": "Alice",
+                    "status": "sent_unverified",
+                    "sentAt": sent_at.isoformat(timespec="seconds"),
+                },
+                "sec:sec-1": {
+                    "targetRef": "sec:sec-1",
+                    "displayName": "Alice",
+                    "status": "failed_retryable",
+                    "lastAttemptAt": failed_at.isoformat(timespec="seconds"),
+                },
+            },
+        }
+
+        streak_state.resolve_target_ref(account, "Alice")
+
+        self.assertEqual(
+            "failed_retryable",
             account["target_states"]["sec:sec-1"]["status"],
         )
 
@@ -3742,6 +3798,45 @@ class StreakTaskIntegrationTests(unittest.TestCase):
         entry = streak_state.failure_entry(account, "Alice New", NOW.tzinfo)
         self.assertEqual(3, entry["attemptCount"])
         self.assertEqual("second", entry["reason"])
+
+    def test_browser_failure_after_previous_day_delivery_is_queued(self):
+        # Every browser delivery lands as sent_unverified. Yesterday's must not
+        # swallow today's failure, or the retry cap never counts it.
+        account = {
+            "username": "demo",
+            "unique_id": "1001",
+            "targets": ["Alice"],
+            "cookies": [{"name": "sessionid", "value": "x"}],
+        }
+        accounts = [account]
+        streak_state.mark_sent_unverified(
+            account,
+            "Alice",
+            run_id="yesterday",
+            strategy="browser",
+            now=NOW - timedelta(days=1),
+        )
+
+        with patch.object(
+            tasks,
+            "update_user_data",
+            side_effect=self._update_side_effect(accounts),
+        ):
+            tasks._persist_browser_send_failure(
+                account.copy(),
+                "Alice",
+                "hello",
+                "friend_not_found",
+                "not in friend list before idle timeout",
+                NOW.isoformat(timespec="seconds"),
+            )
+
+        entry = streak_state.failure_entry(account, "Alice", NOW.tzinfo)
+        self.assertEqual(1, entry["attemptCount"])
+        self.assertEqual(
+            "failed_retryable",
+            streak_state.target_state(account, "Alice", NOW)["status"],
+        )
 
     def test_rejected_older_browser_failure_does_not_write_queue(self):
         account = {

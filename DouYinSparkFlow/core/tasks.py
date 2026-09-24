@@ -2520,8 +2520,10 @@ def record_friend_scan(user, names, *, scan_complete, targets=None, missing_targ
 
 def _persist_browser_send_failure(user, target_name, message, category, reason, attempted_at, server_receipt=None):
     state_now = parse_sent_at(attempted_at, timezone.utc) or datetime.now(timezone.utc)
+    kept_state = {}
 
     def mutate(accounts):
+        kept_state.clear()
         matched = _find_matching_account(accounts, user)
         if matched is None:
             return None, False
@@ -2540,6 +2542,7 @@ def _persist_browser_send_failure(user, target_name, message, category, reason, 
             or str(state.get("lastAttemptAt") or "")
             != state_now.isoformat(timespec="seconds")
         ):
+            kept_state.update(state)
             return None, False
         queue = dict(matched.get("failure_queue") or {})
         existing_entry = streak_state.failure_entry(
@@ -2563,11 +2566,20 @@ def _persist_browser_send_failure(user, target_name, message, category, reason, 
 
     saved = update_user_data(mutate, force_reload=True)
     if saved is None:
-        logger.warning(
-            "Could not find account to persist browser send failure for user=%s target=%s",
-            user.get("username", "unknown"),
-            target_name,
-        )
+        if kept_state:
+            logger.info(
+                "Kept %s state instead of browser send failure for user=%s target=%s category=%s",
+                kept_state.get("status") or "unknown",
+                user.get("username", "unknown"),
+                target_name,
+                category,
+            )
+        else:
+            logger.warning(
+                "Could not find account to persist browser send failure for user=%s target=%s",
+                user.get("username", "unknown"),
+                target_name,
+            )
         return
 
     queue_entry, matched_account = saved

@@ -756,7 +756,16 @@ def _prefer_state(left, right):
             left_time and (right_time is None or left_time > right_time)
         )
     if right_status == STATE_SENT_UNVERIFIED and left_status in FAILED_STATES:
-        return False
+        # Within one schedule day weak evidence of a send outranks a later
+        # failure, so the target is not sent twice. Evidence from an earlier
+        # day says nothing about today: letting it win left every failure of a
+        # previously delivered target unrecorded, so the retry cap never
+        # counted and the console never showed the failure.
+        return bool(
+            left_time
+            and not same_day
+            and (right_time is None or left_time > right_time)
+        )
 
     if left_status in FAILED_STATES and right_status == STATE_IN_FLIGHT:
         return bool(
