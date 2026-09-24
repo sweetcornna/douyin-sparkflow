@@ -661,6 +661,33 @@ def get_schedule_alignment(recent_triggers=None):
     }
 
 
+UNSENT_RETRY_INTERVAL_HOURS = 2
+
+
+def unsent_retry_hours_for(end_hour):
+    """Evening hours that re-drive today's unsent targets after the window closes.
+
+    The close-out fallback alone is a single point of failure: when that one run
+    dies (host froze, network down, friend list never loaded) the day is lost.
+    It cannot be repeated later because the fallback phase ends one interval
+    after the window, so the retries use the unsent-only selection instead.
+    """
+    end_hour = int(end_hour)
+    return list(range(end_hour + UNSENT_RETRY_INTERVAL_HOURS, 24, UNSENT_RETRY_INTERVAL_HOURS))
+
+
+def build_unsent_retry_task_command():
+    return build_scheduled_task_command(
+        {
+            "SPARKFLOW_MANUAL_RUN": "1",
+            "SPARKFLOW_MANUAL_UNSENT_ONLY": "1",
+            "SPARKFLOW_UNSENT_RETRY": "1",
+            "PYTHONUNBUFFERED": "1",
+        },
+        trigger_label="unsent retry",
+    )
+
+
 def replace_douyin_cron_schedule(crontab_text, time_string):
     schedule = parse_schedule_string(time_string)
     scheduled_command = build_scheduled_task_command()
@@ -699,6 +726,12 @@ def replace_douyin_cron_schedule(crontab_text, time_string):
                 f"0 {end_hour} * * * "
                 f"{fallback_command} >> {CRON_LOG_PATH} 2>&1"
             )
+            retry_hours = unsent_retry_hours_for(end_hour)
+            if retry_hours:
+                updated.append(
+                    f"0 {','.join(str(hour) for hour in retry_hours)} * * * "
+                    f"{build_unsent_retry_task_command()} >> {CRON_LOG_PATH} 2>&1"
+                )
     else:
         updated.append(
             f"{schedule['minute']} {schedule['hour']} * * * "
@@ -862,6 +895,8 @@ def _next_window_trigger(now, window):
         microsecond=0,
     )
     candidates.append(fallback_at)
+    for retry_hour in unsent_retry_hours_for(end_hour):
+        candidates.append(now.replace(hour=retry_hour, minute=0, second=0, microsecond=0))
     for candidate in sorted(set(candidates)):
         if candidate > now:
             return candidate

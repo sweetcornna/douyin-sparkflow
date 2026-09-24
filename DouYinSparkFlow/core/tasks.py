@@ -1791,6 +1791,12 @@ def _manual_run_unsent_only():
     return _is_manual_run() and os.getenv("SPARKFLOW_MANUAL_UNSENT_ONLY") == "1"
 
 
+def _is_unsent_retry_run():
+    # Cron-driven evening retry: selects like the manual unsent run, but nobody
+    # is watching it, so it must honour account preflight and pauses.
+    return _manual_run_unsent_only() and os.getenv("SPARKFLOW_UNSENT_RETRY") == "1"
+
+
 def _requested_account_refs():
     raw = os.getenv("SPARKFLOW_ACCOUNT_REFS")
     if raw is None:
@@ -2189,7 +2195,7 @@ def _prepare_active_users_for_run(active_config, active_user_data):
     schedule_tz = _schedule_timezone()
     now = datetime.now(schedule_tz)
 
-    if not _is_manual_run() or _is_fallback_run():
+    if not _is_manual_run() or _is_fallback_run() or _is_unsent_retry_run():
         healthy_users = []
         checked_at = now.astimezone(timezone.utc).isoformat(timespec="seconds")
         for user in active_user_data:

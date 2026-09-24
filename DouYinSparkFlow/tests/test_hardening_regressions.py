@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -765,6 +765,47 @@ class RuntimeHardeningTests(unittest.TestCase):
         self.assertIn("*/20 10-22 * * * scheduled", crontab)
         self.assertIn("0-58/20 23 * * * scheduled", crontab)
         self.assertIn("59 23 * * * fallback", crontab)
+
+    def test_cron_sync_retries_unsent_targets_into_the_evening(self):
+        # A single close-out run is a single point of failure: 2026-09-24 the
+        # 18:00 fallback froze the host and 24 targets had no second chance.
+        with (
+            patch.object(ops, "build_scheduled_task_command", return_value="scheduled"),
+            patch.object(ops, "build_unsent_fallback_task_command", return_value="fallback"),
+            patch.object(ops, "build_unsent_retry_task_command", return_value="retry"),
+        ):
+            evening = ops.replace_douyin_cron_schedule("", "10:00-18:00/20m")
+            late = ops.replace_douyin_cron_schedule("", "10:00-22:00/20m")
+            midnight = ops.replace_douyin_cron_schedule("", "10:00-24:00/20m")
+            fixed = ops.replace_douyin_cron_schedule("", "09:30")
+
+        self.assertIn("0 18 * * * fallback", evening)
+        self.assertIn("0 20,22 * * * retry", evening)
+        self.assertNotIn("retry", late)
+        self.assertNotIn("retry", midnight)
+        self.assertNotIn("retry", fixed)
+
+    def test_unsent_retry_command_selects_unsent_targets_outside_the_fallback_phase(self):
+        # The fallback phase ends one interval after the window, so a retry
+        # carrying SPARKFLOW_FALLBACK_PHASE would select nothing at 20:00.
+        with patch.object(ops, "running_in_container", return_value=True):
+            command = ops.build_unsent_retry_task_command()
+
+        self.assertIn("SPARKFLOW_MANUAL_RUN=1", command)
+        self.assertIn("SPARKFLOW_MANUAL_UNSENT_ONLY=1", command)
+        self.assertIn("SPARKFLOW_UNSENT_RETRY=1", command)
+        self.assertNotIn("SPARKFLOW_FALLBACK_PHASE", command)
+        self.assertTrue(any(marker in command for marker in ops.TASK_SCHEDULE_MARKERS))
+
+    def test_next_trigger_includes_the_evening_unsent_retries(self):
+        window = {"startHour": 10, "endHour": 18, "scheduleIntervalMinutes": 20}
+        tz = timezone(timedelta(hours=8))
+
+        after_close_out = ops._next_window_trigger(datetime(2026, 9, 24, 18, 30, tzinfo=tz), window)
+        after_last_retry = ops._next_window_trigger(datetime(2026, 9, 24, 22, 30, tzinfo=tz), window)
+
+        self.assertEqual(datetime(2026, 9, 24, 20, 0, tzinfo=tz), after_close_out)
+        self.assertEqual(datetime(2026, 9, 25, 10, 0, tzinfo=tz), after_last_retry)
 
     def test_midnight_window_treats_utc_rollover_as_same_local_day(self):
         now = datetime(2026, 9, 13, 0, 5, tzinfo=timezone.utc)

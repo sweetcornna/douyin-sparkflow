@@ -146,6 +146,36 @@ class SendStateTests(unittest.TestCase):
 
         self.assertEqual(["confirmed", "pending"], prepared[0]["targets"])
 
+    def test_unsent_retry_run_honours_preflight_unlike_a_manual_unsent_run(self):
+        healthy = {
+            "username": "healthy",
+            "unique_id": "1001",
+            "targets": ["Alice"],
+            "cookies": [{"name": "sessionid", "value": "x"}],
+        }
+        logged_out = {
+            "username": "logged-out",
+            "unique_id": "1002",
+            "targets": ["Bob"],
+            "cookies": [],
+        }
+        config = {"dailySendWindow": self.window}
+        manual_unsent = {"SPARKFLOW_MANUAL_RUN": "1", "SPARKFLOW_MANUAL_UNSENT_ONLY": "1"}
+
+        with (
+            patch.object(tasks, "_persist_account_preflight"),
+            patch.dict(os.environ, manual_unsent, clear=False),
+        ):
+            os.environ.pop("SPARKFLOW_UNSENT_RETRY", None)
+            os.environ.pop("SPARKFLOW_FALLBACK_PHASE", None)
+            by_hand = tasks._prepare_active_users_for_run(config, [healthy, logged_out])
+            with patch.dict(os.environ, {"SPARKFLOW_UNSENT_RETRY": "1"}, clear=False):
+                by_cron = tasks._prepare_active_users_for_run(config, [healthy, logged_out])
+
+        self.assertEqual(["healthy", "logged-out"], [user["username"] for user in by_hand])
+        self.assertEqual(["healthy"], [user["username"] for user in by_cron])
+        self.assertEqual(["Alice"], by_cron[0]["targets"])
+
     def test_overlapping_task_run_is_skipped_without_traceback(self):
         config = {
             "multiTask": False,
