@@ -2022,6 +2022,13 @@ def _pending_unsent_targets(user, now):
     for target_name in user.get("targets") or []:
         if _target_sent_today(user, target_name, now):
             continue
+        # Douyin answers /v1/message/send with protobuf, so the JSON receipt check
+        # never succeeds and every delivered message lands as sent_unverified.
+        # _select_due_targets already treats that as handled for today; without the
+        # same check here the unsent fallback re-sent every target a second time.
+        if streak_state.is_sent_unverified(user, target_name, now):
+            skipped_targets.append(f"{target_name}(sent_unverified)")
+            continue
         if streak_state.attempt_in_progress(user, target_name, now):
             skipped_targets.append(f"{target_name}(in_flight)")
             continue

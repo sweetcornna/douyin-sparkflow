@@ -86,7 +86,7 @@ class SendStateTests(unittest.TestCase):
         self.assertEqual(["target"], tasks._pending_failed_targets(user, self.now))
         self.assertEqual(["target"], tasks._pending_unsent_targets(user, self.now)[0])
 
-    def test_legacy_sent_at_only_record_is_retryable(self):
+    def test_legacy_sent_at_only_record_is_retryable_but_not_resent_as_unsent(self):
         user = {
             "targets": ["target"],
             "message_history": {"target": {"sentAt": self.now.isoformat()}},
@@ -97,7 +97,26 @@ class SendStateTests(unittest.TestCase):
         self.assertEqual("unconfirmed", status["status"])
         self.assertTrue(status["legacyUnverified"])
         self.assertEqual(["target"], tasks._pending_failed_targets(user, self.now))
-        self.assertEqual(["target"], tasks._pending_unsent_targets(user, self.now)[0])
+        # A sentAt from today is weak evidence of a send, like sent_unverified:
+        # the unsent runs leave it alone and only a failed-only retry re-sends it.
+        retry, skipped = tasks._pending_unsent_targets(user, self.now)
+        self.assertEqual([], retry)
+        self.assertEqual(["target(sent_unverified)"], skipped)
+
+    def test_unsent_runs_skip_targets_sent_unverified_today(self):
+        user = {"username": "demo", "targets": ["sent", "pending"]}
+        streak_state.mark_sent_unverified(
+            user,
+            "sent",
+            run_id="run-1",
+            strategy="browser",
+            now=self.now,
+        )
+
+        retry, skipped = tasks._pending_unsent_targets(user, self.now)
+
+        self.assertEqual(["pending"], retry)
+        self.assertEqual(["sent(sent_unverified)"], skipped)
 
     def test_unsent_retry_respects_non_retryable_and_attempt_limit(self):
         user = {
