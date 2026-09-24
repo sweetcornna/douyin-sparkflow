@@ -465,7 +465,7 @@ async def _run_websocket_relays(*coroutines):
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-_FRIEND_REFRESH_TIMEOUT_SECONDS = 300
+_FRIEND_REFRESH_TIMEOUT_SECONDS = int(os.getenv("SPARKFLOW_FRIEND_REFRESH_TIMEOUT_SECONDS") or 900)
 _friend_refresh_active = set()
 
 

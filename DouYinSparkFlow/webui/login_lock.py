@@ -27,7 +27,7 @@ def _default_lock_path() -> Path:
 
 
 LOCK_PATH = _default_lock_path()
-LOCK_TTL_SECONDS = 60
+LOCK_TTL_SECONDS = int(os.getenv("SPARKFLOW_LOGIN_LOCK_TTL_SECONDS") or 600)
 QUEUE_MAX_SIZE = 32
 _MUTEX = threading.Lock()
 
