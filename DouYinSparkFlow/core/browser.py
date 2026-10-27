@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -191,6 +192,72 @@ def normalize_persistent_profile_config(active_config):
             raw.get("refreshStoredCookiesAfterLogin", True)
         ),
     }
+
+
+# The account store keeps a copy of the persistent profile's cookies, taken
+# after every run that reached the chat page. Douyin re-issues session cookies
+# now and then; when that lands in a run that fails before the copy (a page that
+# never loads, a patrol or a friend refresh, which never copy back), the store
+# is older than the profile, and pushing it in again rolls the live session
+# back. The store records the fingerprint of what it last copied from the
+# profile, so it is only pushed when cookies were saved after that copy (a new
+# login) or the profile has lost its session.
+PROFILE_COOKIE_FINGERPRINT_KEY = "profileCookieFingerprint"
+PROFILE_COOKIE_URLS = ["https://creator.douyin.com/", "https://www.douyin.com/"]
+
+
+def cookie_fingerprint(cookies):
+    entries = sorted(
+        (
+            str(cookie.get("name") or ""),
+            str(cookie.get("domain") or ""),
+            str(cookie.get("path") or ""),
+            str(cookie.get("value") or ""),
+        )
+        for cookie in cookies or []
+        if isinstance(cookie, dict)
+    )
+    return hashlib.sha256(
+        json.dumps(entries, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+async def push_stored_cookies_into_profile(
+    context, account, account_name, profile_config, auth_cookie_names
+):
+    """Apply the account's stored cookies to an open persistent profile.
+
+    Returns True when cookies were written into the profile.
+    """
+    cookies = list((account or {}).get("cookies") or [])
+    sync = bool(profile_config.get("syncStoredCookiesBeforeRun"))
+    if not cookies or not (sync or profile_config.get("seedCookiesWhenEmpty")):
+        return False
+    try:
+        current = await context.cookies(PROFILE_COOKIE_URLS)
+    except Exception:
+        current = []
+    if any(cookie.get("name") in auth_cookie_names for cookie in current):
+        if not sync:
+            logger.info(
+                "Persistent profile for %s already has auth cookies; not seeding stored cookies",
+                account_name,
+            )
+            return False
+        if cookie_fingerprint(cookies) == str(
+            (account or {}).get(PROFILE_COOKIE_FINGERPRINT_KEY) or ""
+        ):
+            logger.info(
+                "Persistent profile for %s holds the session the store last copied "
+                "from it; not overwriting it with the stored copy",
+                account_name,
+            )
+            return False
+    await context.add_cookies(cookies)
+    logger.info(
+        "Applied %s stored cookies to persistent profile for %s", len(cookies), account_name
+    )
+    return True
 
 
 async def first_scrollable_element(page, selectors, *, probe_timeout_ms=2000):

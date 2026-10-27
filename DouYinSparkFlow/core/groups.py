@@ -3,7 +3,7 @@ import asyncio
 from urllib.parse import urlsplit
 
 from core.browser import (account_profile_name, acquire_browser_account_lock, douyin_network_modes,
-    first_scrollable_element, get_browser, get_persistent_browser_context, normalize_persistent_profile_config, release_browser_account_lock)
+    first_scrollable_element, get_browser, get_persistent_browser_context, normalize_persistent_profile_config, push_stored_cookies_into_profile, release_browser_account_lock)
 from core.friends import CHAT_PAGE_URL, _wait_for_chat_or_login
 from core.streak_state import AUTH_COOKIE_NAMES
 from core.tasks import _read_group_row_conversation_id
@@ -107,11 +107,7 @@ async def fetch_account_groups(account):
         lock_handle, lock_path, lock_token = await acquire_browser_account_lock(account, account_name)
         if profile['enabled']:
             playwright, context, _ = await get_persistent_browser_context(account_profile_name(account), root=profile['root'], network_mode=mode)
-            if profile['syncStoredCookiesBeforeRun']:
-                await context.add_cookies(cookies)
-            elif profile['seedCookiesWhenEmpty']:
-                current = await context.cookies(['https://creator.douyin.com/'])
-                if not any(c.get('name') in AUTH_COOKIE_NAMES for c in current): await context.add_cookies(cookies)
+            await push_stored_cookies_into_profile(context, account, account_name, profile, AUTH_COOKIE_NAMES)
         else:
             playwright, browser = await get_browser(GUI=False, network_mode=mode); context = await browser.new_context(); await context.add_cookies(cookies)
         async def guard_write_routes(route):

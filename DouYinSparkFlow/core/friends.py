@@ -9,6 +9,7 @@ from core.browser import (
     get_browser,
     get_persistent_browser_context,
     normalize_persistent_profile_config,
+    push_stored_cookies_into_profile,
     release_browser_account_lock,
 )
 from core.friend_identity import UserDetailCollector
@@ -502,16 +503,9 @@ async def _fetch_account_friends_once(
             )
             # Mirror the sender's cookie policy instead of always overwriting
             # whatever session the profile already holds.
-            if profile_config["syncStoredCookiesBeforeRun"]:
-                await context.add_cookies(cookies)
-            elif profile_config["seedCookiesWhenEmpty"]:
-                current = await context.cookies(
-                    ["https://creator.douyin.com/", "https://www.douyin.com/"]
-                )
-                if not any(
-                    cookie.get("name") in AUTH_COOKIE_NAMES for cookie in current
-                ):
-                    await context.add_cookies(cookies)
+            await push_stored_cookies_into_profile(
+                context, account, account_name, profile_config, AUTH_COOKIE_NAMES
+            )
         else:
             playwright, browser = await get_browser(GUI=False, network_mode=network_mode)
             context = await browser.new_context()

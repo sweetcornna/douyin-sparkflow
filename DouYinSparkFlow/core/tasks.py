@@ -17,12 +17,15 @@ from zoneinfo import ZoneInfo
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from core.browser import (
+    PROFILE_COOKIE_FINGERPRINT_KEY,
     account_profile_name,
     acquire_browser_account_lock,
+    cookie_fingerprint,
     first_scrollable_element,
     get_browser,
     get_persistent_browser_context,
     normalize_persistent_profile_config,
+    push_stored_cookies_into_profile,
     release_browser_account_lock,
     select_douyin_network_mode,
 )
@@ -279,26 +282,10 @@ async def _dismiss_non_login_dialogs(page, account_name, stage):
     return dismissed
 
 
-async def apply_stored_cookies_to_profile(context, cookies, account_name, only_when_empty=False):
-    if not cookies:
-        return
-    if only_when_empty:
-        try:
-            current_cookies = await context.cookies(
-                ["https://creator.douyin.com/", "https://www.douyin.com/"]
-            )
-        except Exception:
-            current_cookies = []
-
-        if any(cookie.get("name") in AUTH_COOKIE_NAMES for cookie in current_cookies):
-            logger.info(
-                "Persistent profile for %s already has auth cookies; not seeding stored cookies",
-                account_name,
-            )
-            return
-
-    await context.add_cookies(cookies)
-    logger.info("Applied %s stored cookies to persistent profile for %s", len(cookies), account_name)
+async def apply_stored_cookies_to_profile(context, user, account_name, profile_config):
+    return await push_stored_cookies_into_profile(
+        context, user, account_name, profile_config, AUTH_COOKIE_NAMES
+    )
 
 
 async def refresh_stored_cookies_from_profile(context, user, account_name):
@@ -316,14 +303,17 @@ async def refresh_stored_cookies_from_profile(context, user, account_name):
         if matched is None:
             return None, False
         matched["cookies"] = list(cookies)
+        matched[PROFILE_COOKIE_FINGERPRINT_KEY] = fingerprint
         return matched, True
 
+    fingerprint = cookie_fingerprint(cookies)
     matched_account = update_user_data(mutate, force_reload=True)
     if matched_account is None:
         logger.warning("Could not find account to refresh cookies for user=%s", account_name)
         return
 
     user["cookies"] = list(cookies)
+    user[PROFILE_COOKIE_FINGERPRINT_KEY] = fingerprint
     logger.info("Refreshed stored cookies for %s from persistent profile count=%s", account_name, len(cookies))
 
 
@@ -4157,10 +4147,7 @@ async def _do_user_task_locked(
                 network_mode=network_mode,
             )
             logger.info("Opened persistent browser profile for %s at %s", account_name, profile_dir)
-            if profile_config["syncStoredCookiesBeforeRun"]:
-                await apply_stored_cookies_to_profile(context, cookies, account_name)
-            elif profile_config["seedCookiesWhenEmpty"]:
-                await apply_stored_cookies_to_profile(context, cookies, account_name, only_when_empty=True)
+            await apply_stored_cookies_to_profile(context, user, account_name, profile_config)
         else:
             context = await browser.new_context()
 

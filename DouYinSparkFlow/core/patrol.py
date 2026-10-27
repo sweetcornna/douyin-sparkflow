@@ -38,6 +38,7 @@ from core.browser import (
     get_browser,
     get_persistent_browser_context,
     normalize_persistent_profile_config,
+    push_stored_cookies_into_profile,
     release_browser_account_lock,
 )
 from core.friends import (
@@ -265,14 +266,9 @@ async def _open_session(user, network_mode, profile_config):
                     root=profile_config["root"],
                     network_mode=network_mode,
                 )
-                if profile_config["syncStoredCookiesBeforeRun"]:
-                    await context.add_cookies(cookies)
-                elif profile_config["seedCookiesWhenEmpty"]:
-                    current = await context.cookies(
-                        ["https://creator.douyin.com/", "https://www.douyin.com/"]
-                    )
-                    if not any(cookie.get("name") in AUTH_COOKIE_NAMES for cookie in current):
-                        await context.add_cookies(cookies)
+                await push_stored_cookies_into_profile(
+                    context, user, _account_name(user), profile_config, AUTH_COOKIE_NAMES
+                )
             else:
                 playwright, browser = await get_browser(GUI=False, network_mode=network_mode)
                 context = await browser.new_context()
