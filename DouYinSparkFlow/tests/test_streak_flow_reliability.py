@@ -2319,6 +2319,8 @@ class StreakRunReportTests(unittest.TestCase):
         self.assertEqual("account has no cookies", record["reason"])
 
     def test_run_report_carries_evidence_level_and_sent_time(self):
+        # The report only presents today's outcome, so the weak send is today.
+        sent_today = datetime.now(timezone.utc).replace(microsecond=0)
         account = {
             "username": "demo",
             "unique_id": "1001",
@@ -2336,7 +2338,7 @@ class StreakRunReportTests(unittest.TestCase):
             },
             "message_history": {
                 "Alice": {
-                    "sentAt": "2026-09-18T10:05:00+08:00",
+                    "sentAt": sent_today.isoformat(),
                     "confirmationLevel": "weak",
                     "confirmationSource": "browser_visible_count_increased",
                     "confirmationDetail": "page echo only",
@@ -2364,7 +2366,7 @@ class StreakRunReportTests(unittest.TestCase):
         self.assertEqual("browser_visible_count_increased", record["confirmationSource"])
         self.assertEqual("page echo only", record["confirmationDetail"])
         self.assertTrue(record["needsVerification"])
-        self.assertTrue(str(record["sentAt"]).startswith("2026-09-18T"))
+        self.assertEqual(sent_today.isoformat(), record["sentAt"])
 
     def test_report_redacts_credentials_from_free_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3441,6 +3443,8 @@ class StreakTaskIntegrationTests(unittest.TestCase):
             "account_ref": "acc-1",
             "username": "demo",
             "unique_id": "1001",
+            "platform_uid": "1001",
+            "identity_binding": {"source": "creator_im_user_token", "version": 1, "method": "same_uid"},
             "targets": ["Alice"],
             "cookies": [{"name": "sessionid", "value": "old"}],
             "account_failure": {
@@ -3475,6 +3479,7 @@ class StreakTaskIntegrationTests(unittest.TestCase):
                     "cookies": [{"name": "sessionid", "value": "new"}],
                 },
                 relogin_unique_id="1001",
+                identity={"uid": "1001", "source": "creator_im_user_token", "version": 1},
             )
 
         self.assertEqual("updated", action)
@@ -4218,7 +4223,10 @@ class StreakTaskIntegrationTests(unittest.TestCase):
             )
         )
 
-    def test_server_rejection_can_still_persist_visible_weak_evidence(self):
+    def test_unknown_receipt_can_still_persist_visible_weak_evidence(self):
+        # A receipt we could not read is not a refusal: the page bubble stays the
+        # only evidence and the attempt is recorded as unverified. An explicit
+        # refusal (BrowserSendRejected) must not reach this path.
         self.assertTrue(
             tasks._should_persist_recovered_browser_evidence(
                 True,

@@ -1,44 +1,117 @@
+// Query-based positioning avoids fragment-encoding bugs in mobile redirects.
 (() => {
-  const root = document.documentElement;
-  const storageKey = "sparkflow-theme";
+  const position = () => {
+    const anchor = new URLSearchParams(window.location.search).get("_anchor");
+    if (!anchor) return;
+    const target = document.getElementById(anchor);
+    if (target) target.scrollIntoView({ block: "start" });
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", position, { once: true });
+  } else {
+    position();
+  }
+})();
 
-  const storedTheme = () => {
-    try {
-      return localStorage.getItem(storageKey);
-    } catch {
-      return null;
-    }
+(() => {
+  const forms = document.querySelectorAll("form[data-ajax-submit]");
+  if (!forms.length) return;
+
+  const setFeedback = (node, level, message) => {
+    if (!node) return;
+    node.hidden = false;
+    node.className = `flash flash-${level}`;
+    node.textContent = message;
+    node.setAttribute("tabindex", "-1");
+    node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    node.focus({ preventScroll: true });
   };
 
-  const applyTheme = (theme) => {
-    const value = theme === "light" ? "light" : "dark";
-    root.dataset.theme = value;
-    root.style.colorScheme = value;
-    try {
-      localStorage.setItem(storageKey, value);
-    } catch {
-      // The active page can still switch themes when storage is unavailable.
+  const feedbackMessageFor = (response) => {
+    if (response.status === 401 || response.redirected) {
+      return "登录状态已失效，请重新登录后重试。";
     }
+    if (response.status === 403) {
+      return "会话已失效或请求校验失败，请刷新页面后重试。";
+    }
+    return `请求失败（HTTP ${response.status}），请检查后重试。`;
   };
 
-  applyTheme(storedTheme() || "dark");
-  document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
-    button.addEventListener("click", () => {
-      applyTheme(root.dataset.theme === "light" ? "dark" : "light");
+  forms.forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const feedback = form.querySelector("[data-form-feedback]")
+        || document.getElementById("notify-feedback");
+      const submit = form.querySelector('button[type="submit"]');
+      const buttons = document.querySelectorAll("form[data-ajax-submit] button[type=submit]");
+      buttons.forEach((button) => { button.disabled = true; });
+      setFeedback(feedback, "info", "正在处理…");
+
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: new FormData(form),
+          credentials: "same-origin",
+          headers: { "X-Requested-With": "XMLHttpRequest" },
+        });
+        if (!response.ok) {
+          setFeedback(feedback, "error", feedbackMessageFor(response));
+          return;
+        }
+        if (!response.headers.get("content-type")?.includes("application/json")) {
+          setFeedback(feedback, "error", "登录状态已失效，请刷新页面后重试。");
+          return;
+        }
+        const result = await response.json();
+        setFeedback(feedback, result.level || "info", result.message || "操作完成。");
+      } catch {
+        setFeedback(feedback, "error", "网络请求失败，请检查连接后重试。");
+      } finally {
+        buttons.forEach((button) => { button.disabled = false; });
+      }
     });
   });
 })();
 
 (() => {
-  const body = document.body;
-  document.querySelectorAll("[data-nav-toggle]").forEach((button) => {
-    button.addEventListener("click", () => body.classList.add("nav-open"));
+  const root = document.documentElement;
+  const storageKey = "sparkflow-theme";
+  const systemDark = window.matchMedia
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
+
+  const storedTheme = () => {
+    try {
+      const value = localStorage.getItem(storageKey);
+      return value === "light" || value === "dark" ? value : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const systemTheme = () => (systemDark && systemDark.matches ? "dark" : "light");
+
+  const applyTheme = (theme) => {
+    root.dataset.theme = theme === "dark" ? "dark" : "light";
+  };
+
+  // The <head> script already applied this before first paint; repeat it here
+  // so pages without that script still end up consistent.
+  applyTheme(storedTheme() || systemTheme());
+  // Until the user picks a theme explicitly, keep following the system.
+  systemDark?.addEventListener?.("change", () => {
+    if (!storedTheme()) applyTheme(systemTheme());
   });
-  document.querySelectorAll("[data-nav-close]").forEach((button) => {
-    button.addEventListener("click", () => body.classList.remove("nav-open"));
-  });
-  document.querySelectorAll(".nav-item").forEach((link) => {
-    link.addEventListener("click", () => body.classList.remove("nav-open"));
+  document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const next = root.dataset.theme === "dark" ? "light" : "dark";
+      applyTheme(next);
+      try {
+        localStorage.setItem(storageKey, next);
+      } catch {
+        // The active page can still switch themes when storage is unavailable.
+      }
+    });
   });
 })();
 
@@ -219,9 +292,13 @@
         });
         row.querySelectorAll("[data-account-attention]").forEach((node) => {
           node.textContent = account.attention;
+          const chip = node.closest(".pill");
+          if (chip && row.matches("a")) chip.hidden = !account.attention;
         });
         row.querySelectorAll("[data-account-pending]").forEach((node) => {
           node.textContent = account.pending;
+          const chip = node.closest(".pill");
+          if (chip && row.matches("a")) chip.hidden = !account.pending;
         });
         const strongCount = account.confirmed || 0;
         const weakCount = (account.pageEcho || 0) + (account.receiptOnly || 0);
@@ -306,6 +383,22 @@
       `${sentPct}%`,
     );
     setText("[data-overview-value='weakSent']", weakCount);
+    const remaining = Math.max(0, totalCount - strongCount - weakCount);
+    document.querySelectorAll("[data-overview-headline]").forEach((node) => {
+      node.textContent = !totalCount
+        ? "还没有要续的火花"
+        : remaining
+          ? `今天还差 ${remaining} 个火花`
+          : "今天的火花都续上了";
+    });
+    const attentionCount = summary.attention || 0;
+    document.querySelectorAll("[data-attention-callout]").forEach((node) => {
+      node.hidden = attentionCount <= 0;
+    });
+    document.querySelectorAll("[data-nav-attention]").forEach((node) => {
+      node.textContent = attentionCount;
+      node.hidden = attentionCount <= 0;
+    });
     document.querySelectorAll("[data-overview-badge]").forEach((node) => {
       node.style.setProperty("--strong-pct", `${strongPct}%`);
       node.style.setProperty("--weak-pct", `${weakPct}%`);
@@ -403,16 +496,46 @@
   let timer = null;
   let heartbeatTimer = null;
   let countdownTimer = null;
+  // Until this time the routine lines (lease countdown, status poll) leave the
+  // status text alone, so "saving..." or a save error stays readable.
+  let statusHeldUntil = 0;
+  const statusHeld = () => Date.now() < statusHeldUntil;
   let qrRefreshTimer = null;
+  let recoveryTimer = null;
+  // How many automatic re-acquisitions one user action may cause. The budget is
+  // set by a user action and is never renewed by the automatic path itself, so a
+  // flapping lease cannot drive an endless cycle of POST /login-desktop/open
+  // (each one performs a page operation on the shared Douyin login page).
+  const RECOVER_BUDGET = 2;
   let workspace = { state: "closed", active: false, position: 0, ticket: "" };
   if (displayMode === "native" && copyLoginUrlButton) copyLoginUrlButton.hidden = true;
   if (displayMode === "native" && frameWrap) frameWrap.hidden = true;
+  // "显示本机登录浏览器" only makes sense for the Windows native mode; in the
+  // noVNC mode the browser is already shown in the frame, so leaving the button
+  // visible only invited clicks that come back as a 423 lease error.
+  if (displayMode !== "native") {
+    document.querySelectorAll("[data-focus-native-browser]").forEach((button) => {
+      button.hidden = true;
+    });
+  }
 
   const setStatus = (text, tone = "") => {
     if (statusText) statusText.textContent = text;
     if (runtimeState) {
       runtimeState.className = `pill${tone ? ` ${tone}` : ""}`;
-      runtimeState.textContent = tone === "success" ? "使用中" : tone === "danger" ? "异常" : tone === "warning" ? "排队中" : "已关闭";
+      // The label follows the workspace state; the tone only colours it. A
+      // held workspace near its lease renewal is warning-toned but still in use.
+      const state = workspace ? workspace.state : "";
+      runtimeState.textContent =
+        tone === "danger"
+          ? "异常"
+          : state === "active"
+            ? "使用中"
+            : state === "queued"
+              ? "排队中"
+              : state === "resetting"
+                ? "清理中"
+                : "空闲";
     }
   };
 
@@ -427,9 +550,37 @@
       // Keep the server's grading (category / categoryLabel / retryable) so
       // callers can render an actionable message instead of a bare string.
       error.payload = data;
+      // 423 is the lease gate: this session no longer holds the login
+      // workspace, which callers must recover from instead of reporting the
+      // login-desktop service as broken.
+      error.payload.leaseLost = response.status === 423;
       throw error;
     }
     return data;
+  };
+
+  // A legacy account record has no bound platform UID and its old login could
+  // not be checked: the server asks the operator once (issue #41). The token is
+  // opaque, single-use and expires; it carries no cookie or session material.
+  const confirmIdentityMigration = (info) => {
+    const minutes = Math.max(1, Math.round(Number(info.expires_in || 600) / 60));
+    return window.confirm(
+      "这条旧账号记录无法自动核实身份（旧登录已失效）。\n\n" +
+        `账号：${info.username || "未命名"}\n` +
+        `历史 ID：${info.history_id || "无"}（${info.history_id_type || "类型未知"}）\n` +
+        `本次登录的平台 UID：${info.platform_uid || ""}\n` +
+        (info.display_id ? `本次页面显示的 ID：${info.display_id}\n` : "") +
+        "\n点“确定”＝确认本次登录的就是这个原账号：绑定平台 UID，保留它的目标、发送记录和归属" +
+        `（${minutes} 分钟内有效，只能使用一次）；\n` +
+        "点“取消”＝不做任何改动。",
+    );
+  };
+  const identityFailureText = (error) => {
+    const payload = (error && error.payload) || {};
+    const label = payload.identityLabel || payload.categoryLabel;
+    const hint = payload.hint ? ` ${payload.hint}` : "";
+    const retry = payload.retryable ? " 可稍后重试。" : "";
+    return `${label ? `【${label}】` : ""}${error.message}${hint}${retry}`;
   };
 
   const loadFrame = (force = false) => {
@@ -482,6 +633,8 @@
         // re-fetching the QR code on every poll burns the single login-desktop
         // page lock and makes the whole login flow feel sluggish.
         lastPromotedTicket = workspace.ticket;
+        // A new workspace starts a fresh QR wait, whichever path granted it
+        // (user click or automatic recovery).
         if (section && !section.open) section.open = true;
         loadFrame(true);
         qrPollStartedAt = Date.now();
@@ -494,13 +647,14 @@
           frameWrap.hidden = false;
           frameWrap.classList.add("native-login-mode");
         }
+        if (statusHeld()) return;
         setStatus(
           promoted
             ? `已轮到你：Windows 本地登录浏览器已打开，剩余 ${remaining} 秒。完成扫码后请保存登录态。`
             : `Windows 本地登录浏览器已打开，剩余 ${remaining} 秒。完成扫码后请保存登录态。`,
           tone,
         );
-      } else {
+      } else if (!statusHeld()) {
         setStatus(
           promoted
             ? `已轮到你：登录工作区已分配给当前会话，剩余 ${remaining} 秒。完成扫码后请保存登录态。`
@@ -510,11 +664,19 @@
       }
       return;
     }
-    setStatus("登录工作区当前关闭。请从账号卡片点击“重新登录”。");
+    setStatus("登录工作区当前未分配给本会话（空闲或由其他会话占用）。点“添加新账号”，或在账号页选择“重新登录”。");
   };
 
   let qrPollStartedAt = 0;
   let lastPromotedTicket = "";
+  // How long to keep waiting for a QR code after the workspace opened. Each
+  // GET /qr already waits upstream for the code, so the page only re-asks
+  // about a second after each answer.
+  const QR_WAIT_LIMIT_MS = 60000;
+  const QR_RETRY_MS = 1000;
+  let recoveringLease = false;
+  let recoverAttempts = 0;
+  let acquiringWorkspace = false;
   const setQrButtons = (label, { busy = false, stopped = false } = {}) => {
     document.querySelectorAll("[data-refresh-login-qr]").forEach((button) => {
       const text = button.querySelector("span");
@@ -522,13 +684,59 @@
       button.disabled = busy;
       button.dataset.qrStopped = stopped ? "1" : "";
     });
+    // Any final QR outcome (shown, expired, stopped) ends the opening feedback.
+    if (!busy) stopOpening();
   };
+
+  // From the click until a QR code shows, starting the login browser and
+  // rendering the Douyin page takes tens of seconds on this host; say so and
+  // count, instead of leaving both panes blank and the button clickable.
+  const qrPlaceholder = document.querySelector(".qr-placeholder span");
+  const qrPlaceholderText = qrPlaceholder ? qrPlaceholder.textContent : "";
+  let openingTimer = null;
+  let openingStartedAt = 0;
+  const renderOpening = () => {
+    const seconds = Math.round((Date.now() - openingStartedAt) / 1000);
+    const text = `正在启动登录浏览器…已等待 ${seconds} 秒（通常 20 秒左右）`;
+    if (qrPlaceholder) qrPlaceholder.textContent = text;
+    if (frameWrap) frameWrap.dataset.progress = text;
+  };
+  const startOpening = () => {
+    window.clearInterval(openingTimer);
+    openingStartedAt = Date.now();
+    document.querySelectorAll(".login-desktop-open").forEach((button) => {
+      button.disabled = true;
+    });
+    renderOpening();
+    openingTimer = window.setInterval(renderOpening, 1000);
+  };
+  function stopOpening() {
+    if (!openingStartedAt) return;
+    window.clearInterval(openingTimer);
+    openingTimer = null;
+    openingStartedAt = 0;
+    document.querySelectorAll(".login-desktop-open").forEach((button) => {
+      button.disabled = false;
+    });
+    if (qrPlaceholder) qrPlaceholder.textContent = qrPlaceholderText;
+    if (frameWrap) delete frameWrap.dataset.progress;
+  }
   const qrWaitLabel = () => {
     if (!qrPollStartedAt) return "";
     return `（已等待 ${Math.round((Date.now() - qrPollStartedAt) / 1000)} 秒）`;
   };
 
-  const refreshLoginQr = async (delay = 0, retries = 400) => {
+  // 423 means this session does not hold the login workspace lease. That is a
+  // workspace-state problem, not a slow page: retrying blindly made the QR code
+  // spin forever and the noVNC frame never load. Drop the stale local view,
+  // re-read the real workspace state and try to take the workspace back.
+  const setRecoverVisible = (visible) => {
+    document.querySelectorAll("[data-recover-login-workspace]").forEach((button) => {
+      button.hidden = !visible;
+    });
+  };
+
+  const refreshLoginQr = async (delay = 0, retries = 40) => {
     if (!qrImage || workspace.state !== "active" || !workspace.active) return;
     window.clearTimeout(qrRefreshTimer);
     qrRefreshTimer = window.setTimeout(async () => {
@@ -544,6 +752,10 @@
       };
       try {
         const response = await fetch(`/login-desktop/qr?t=${Date.now()}`, { credentials: "same-origin", cache: "no-store" });
+        if (response.status === 423) {
+          recoverLease();
+          return;
+        }
         if (response.status === 409) {
           // Only an explicit refresh regenerates an expired QR code, so stop
           // polling and put the button into a visible retry state.
@@ -557,7 +769,21 @@
           if (data.logged_in || data.state === "qr_logged_in") {
             if (qrStatus) qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
           }
-          retryLater(data.message || "浏览器正在生成二维码");
+          // GET /qr only reads the page, and a healthy login page produces its
+          // code within a few seconds on its own. If none appears after a few
+          // polls, stop guessing and hand the decision back: each
+          // POST /qr/refresh reloads the shared Douyin login page while the
+          // operator may be scanning in the noVNC frame, because the page lock
+          // is global.
+          if (Date.now() - qrPollStartedAt >= QR_WAIT_LIMIT_MS) {
+            if (qrStatus) {
+              qrStatus.textContent = (data.message || "浏览器仍未生成二维码") + " 请点击“刷新二维码”重试，或稍后再试。";
+            }
+            setQrButtons("已停止，点此重试", { stopped: true });
+            return;
+          }
+          // The request itself already waited upstream, so ask again soon.
+          retryLater(data.message || "浏览器正在生成二维码", QR_RETRY_MS);
           return;
         }
         if (response.status === 503) {
@@ -573,9 +799,9 @@
           const data = await response.json().catch(() => ({}));
           // Distinguish "cannot reach Douyin" from "the login service is down";
           // the old copy blamed the login desktop for every upstream failure.
-          const upstream = /douyin|network|proxy|timeout|超时|网络/i.test(
-            String(data.message || data.error || ""),
-          );
+          const upstream =
+            data.category === "douyin_unreachable" ||
+            /douyin|network|proxy|timeout|超时|网络/i.test(String(data.message || data.error || ""));
           if (qrStatus) {
             qrStatus.textContent =
               data.message ||
@@ -584,6 +810,14 @@
                 ? "无法访问抖音（网络或代理异常），请检查代理后重试。"
                 : "登录桌面服务暂时不可用，请稍后点击刷新二维码。");
           }
+          // Polling stops here, so the refresh button must not stay disabled
+          // from the "读取中…" state the grant put it in.
+          setQrButtons("已停止，点此重试", { stopped: true });
+          return;
+        }
+        if (response.status === 401) {
+          if (qrStatus) qrStatus.textContent = "登录状态已失效，请重新登录控制台。";
+          setQrButtons("已停止，点此重试", { stopped: true });
           return;
         }
         if (!response.ok) throw new Error(String(response.status));
@@ -614,15 +848,38 @@
     try {
       const statusUrl = workspace.state === "active" ? "/login-desktop/status" : "/login-desktop/workspace-status";
       const response = await fetch(statusUrl, { credentials: "same-origin", cache: "no-store" });
+      if (response.status === 423) {
+        // The lease is not held by this session any more. Showing "check the
+        // login-desktop service" here pointed operators at a container that was
+        // perfectly healthy. The recovery path hides the stale frame, re-reads
+        // the workspace state and takes the workspace back with a bounded
+        // backoff; recoverLease() itself refuses to start a second loop, so the
+        // 10s status poll cannot stack recoveries.
+        if (qrStatus) {
+          qrStatus.textContent = "本会话当前未持有登录工作区：正在重新申请…";
+        }
+        recoverLease();
+        return;
+      }
+      if (response.status === 401) {
+        setRecoverVisible(false);
+        setStatus("登录状态已失效，请重新登录控制台。", "danger");
+        return;
+      }
       const data = await response.json();
       if (!response.ok || data.ok === false) {
-        setStatus(data.error || "登录工作区不可用，请检查 login-desktop 服务。", "danger");
+        setStatus(data.error || "登录工作区暂时不可用，请稍后重试。", "danger");
         return;
+      }
+      if (data.workspace && data.workspace.state === "active" && data.workspace.active) {
+        setRecoverVisible(false);
       }
       renderWorkspace(data.workspace);
       if (workspace.state === "active" && workspace.active) {
         loadFrame();
-        if (data.logged_in) {
+        if (statusHeld()) {
+          // An in-progress save or its error owns the status line.
+        } else if (data.logged_in) {
           setStatus(`当前浏览器已登录：${data.username}，请保存登录态。`, "success");
         } else if (data.login_state === "unknown") {
           // The page was mid-operation, so "not logged in" would be a guess.
@@ -642,6 +899,10 @@
       const data = await postForm("/login-desktop/heartbeat", { ticket: workspace.ticket });
       renderWorkspace(data.workspace);
     } catch (error) {
+      if (error.payload && error.payload.leaseLost) {
+        recoverLease();
+        return;
+      }
       workspace = { state: "closed", active: false, position: 0, ticket: "" };
       closeFrame();
       setStatus(`登录工作区已释放：${error.message}`, "danger");
@@ -651,19 +912,37 @@
   document.querySelectorAll(".login-desktop-open").forEach((button) => {
     button.addEventListener("click", async () => {
       if (section) section.open = true;
+      startOpening();
       try {
+        resetRecoveryBudget();
         const reloginUniqueId = button.dataset.reloginUniqueId || "";
         const mode = button.dataset.loginMode || (reloginUniqueId ? "relogin" : "add");
         const data = await postForm("/login-desktop/open", {
           mode,
           ...(reloginUniqueId ? { relogin_unique_id: reloginUniqueId } : {}),
         });
+        const promotedBefore = lastPromotedTicket;
         renderWorkspace(data.workspace);
-        if (data.state === "queued") return;
-        loadFrame(true);
-        refreshLoginQr(500);
+        if (data.state === "queued") {
+          stopOpening();
+          return;
+        }
+        // A fresh grant already loaded the frame and started the QR wait in
+        // renderWorkspace; loading it again here reloaded noVNC mid-connect.
+        // Re-opening a workspace this session already holds keeps the ticket,
+        // so only then start them here.
+        if (!workspace.active) {
+          // Granted and immediately lost (a racing release): nothing will
+          // finish the feedback, so end it here.
+          stopOpening();
+        } else if (lastPromotedTicket === promotedBefore) {
+          loadFrame(true);
+          qrPollStartedAt = Date.now();
+          refreshLoginQr(500);
+        }
         if (frame) frame.scrollIntoView({ behavior: "smooth", block: "start" });
       } catch (error) {
+        stopOpening();
         setStatus(`申请登录工作区失败：${error.message}`, "danger");
       }
     });
@@ -676,6 +955,10 @@
         await postForm("/login-desktop/focus", { ticket: workspace.ticket });
         setStatus("已请求显示本机登录浏览器，请在桌面窗口中继续操作。", "success");
       } catch (error) {
+        if (error.payload && error.payload.leaseLost) {
+          recoverLease();
+          return;
+        }
         setStatus(`显示登录浏览器失败：${error.message}`, "danger");
       } finally {
         button.disabled = false;
@@ -683,34 +966,52 @@
     });
   });
 
+  // Only the manual "刷新二维码" button calls this: the POST reloads the shared
+  // login page, so it must never be triggered automatically.
+  const requestQrRefresh = async () => {
+    qrPollStartedAt = Date.now();
+    const refreshForm = new FormData();
+    refreshForm.set("csrf_token", csrfToken);
+    refreshForm.set("ticket", workspace.ticket);
+    const response = await fetch("/login-desktop/qr/refresh", {
+      method: "POST",
+      body: refreshForm,
+      credentials: "same-origin",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401) {
+      if (qrStatus) qrStatus.textContent = "登录状态已失效，请重新登录控制台。";
+      setQrButtons("已停止，点此重试", { stopped: true });
+      return;
+    }
+    if (response.status === 423) {
+      recoverLease();
+      return;
+    }
+    if (!response.ok || data.ok === false) {
+      // A 202 with ok:false means the page did not produce a QR code yet.
+      if (qrStatus) {
+        qrStatus.textContent = `刷新二维码未完成：${data.message || data.error || response.status}`;
+      }
+      if (data.state === "logged_in" || data.logged_in) {
+        if (qrStatus) {
+          qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
+        }
+      }
+      qrPollStartedAt = Date.now();
+      refreshLoginQr(1200);
+      return;
+    }
+    qrPollStartedAt = Date.now();
+    refreshLoginQr(500);
+  };
+
   document.querySelectorAll("[data-refresh-login-qr]").forEach((button) => {
     button.addEventListener("click", async () => {
       button.disabled = true;
-      qrPollStartedAt = Date.now();
       try {
-        const refreshForm = new FormData();
-        refreshForm.set("csrf_token", csrfToken);
-        refreshForm.set("ticket", workspace.ticket);
-        const response = await fetch("/login-desktop/qr/refresh", {
-          method: "POST",
-          body: refreshForm,
-          credentials: "same-origin",
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || data.ok === false) {
-          // A 202 with ok:false means the page did not produce a QR code yet.
-          if (qrStatus) {
-            qrStatus.textContent = `刷新二维码未完成：${data.message || data.error || response.status}`;
-          }
-          if (data.state === "logged_in" || data.logged_in) {
-            if (qrStatus) {
-              qrStatus.textContent = data.message || "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码...";
-            }
-          }
-          refreshLoginQr(1200);
-          return;
-        }
-        refreshLoginQr(500);
+        resetRecoveryBudget();
+        await requestQrRefresh();
       } catch (error) {
         if (qrStatus) qrStatus.textContent = `刷新二维码失败：${error.message}`;
       } finally {
@@ -742,11 +1043,23 @@
       const previousLabel = status ? status.textContent : "";
       if (status) status.textContent = "正在验证 Cookie 并登录，请稍候...";
       try {
-        const data = await postForm("/accounts/cookies", {
+        const cookiePayload = {
           cookie_input: cookieInput,
           display_name: String(displayName?.value || "").trim(),
           relogin_unique_id: reloginToggle?.checked ? String(reloginSelect?.value || "") : "",
-        });
+        };
+        let data;
+        try {
+          data = await postForm("/accounts/cookies", cookiePayload);
+        } catch (error) {
+          const info = error.payload && error.payload.identity_confirmation;
+          if (!info) throw error;
+          if (!confirmIdentityMigration(info)) {
+            if (status) status.textContent = "已取消：没有改动任何账号。";
+            return;
+          }
+          data = await postForm("/accounts/cookies", { ...cookiePayload, confirm_identity: info.token });
+        }
         if (status) status.textContent = data.message || "Cookie 登录成功，页面即将刷新。";
         if (input) input.value = "";
         window.setTimeout(() => window.location.reload(), 900);
@@ -761,7 +1074,9 @@
             payload.retryable === false
               ? "这类失败重试通常无效，请重新获取 Cookie。"
               : "可稍后重试。";
-          status.textContent = `Cookie 登录失败${label}：${error.message}${retryHint}`;
+          status.textContent = payload.identityState
+            ? `Cookie 登录未保存：${identityFailureText(error)}`
+            : `Cookie 登录失败${label}：${error.message}${retryHint}`;
         }
       } finally {
         submit.disabled = false;
@@ -769,14 +1084,51 @@
     });
   });
 
+  // Saving exports the login, verifies it in a second browser and releases the
+  // workspace: tens of seconds on this host. Without feedback the operator
+  // clicked again, and the second save raced the first one's release.
+  let savingTimer = null;
+  const setSaving = (saving, { keepDisabled = false } = {}) => {
+    window.clearInterval(savingTimer);
+    savingTimer = null;
+    document.querySelectorAll(".login-desktop-save").forEach((item) => {
+      item.disabled = saving || keepDisabled;
+    });
+    // Whatever is shown next (result or error) stays readable for a while.
+    statusHeldUntil = saving ? Infinity : Date.now() + 8000;
+    if (!saving) return;
+    const startedAt = Date.now();
+    const render = () => {
+      const seconds = Math.round((Date.now() - startedAt) / 1000);
+      setStatus(`正在保存登录账号…已等待 ${seconds} 秒（通常几秒，请不要重复点击）`, "warning");
+    };
+    render();
+    savingTimer = window.setInterval(render, 1000);
+  };
   document.querySelectorAll(".login-desktop-save").forEach((button) => {
     button.addEventListener("click", async () => {
-      const saveLogin = (extra = {}) =>
+      if (button.disabled) return;
+      const postSave = (extra = {}) =>
         postForm("/login-desktop/save", {
           relogin_unique_id: button.dataset.reloginUniqueId || "",
           ...extra,
         });
+      const saveLogin = (extra = {}) =>
+        postSave(extra).catch((error) => {
+          const info = error.payload && error.payload.identity_confirmation;
+          if (!info) throw error;
+          setSaving(false);
+          if (!confirmIdentityMigration(info)) {
+            const cancelled = new Error("已取消保存：没有改动任何账号。");
+            cancelled.cancelled = true;
+            throw cancelled;
+          }
+          setSaving(true);
+          return postSave({ ...extra, confirm_identity: info.token });
+        });
+      setSaving(true);
       try {
+        resetRecoveryBudget();
         let data;
         try {
           data = await saveLogin();
@@ -788,6 +1140,7 @@
           if (candidates.length > 1) {
             // Guessing here could merge the login into the wrong account, so the
             // operator is asked to resolve the duplicates first.
+            setSaving(false);
             setStatus(
               `有 ${candidates.length} 个同名账号（${candidates
                 .map((item) => item.unique_id || item.account_ref)
@@ -799,17 +1152,22 @@
           // "Cancel" must mean "do nothing": binding it to "create a duplicate
           // anyway" is the opposite of what the button suggests and is how a
           // second identical account gets created by accident.
+          setSaving(false);
           const update = window.confirm(
             `已有一个同名账号（${candidate.username || "未命名"}）。\n\n` +
               "点“确定”＝更新这个已有账号，保留它的目标与发送记录；\n" +
               "点“取消”＝放弃本次保存，不做任何改动。",
           );
           if (!update) {
+            // The dialog may have stayed open longer than the hold; restart it.
+            statusHeldUntil = Date.now() + 8000;
             setStatus("已取消保存：没有改动任何账号。若确实要新建一个同名账号，请先确认它和已有账号不是同一个人。");
             return;
           }
+          setSaving(true);
           data = await saveLogin({ merge_with: candidate.account_ref });
         }
+        setSaving(false, { keepDisabled: true });
         renderWorkspace(data.workspace);
         if (data.verified === false) {
           // The cookies were stored, but the login state is not usable: show the
@@ -824,21 +1182,42 @@
         }
         // A login save starts a friend refresh; when it could not start, say why
         // instead of leaving the operator waiting for a list that never updates.
+        // The login state is re-checked after the save, in the background.
         const refreshNote =
-          data.friend_refresh === "started"
+          data.verification === "pending"
+            ? "，正在后台验证登录态并刷新好友列表（账号页会显示“登录态验证中”）"
+            : data.friend_refresh === "started"
             ? ""
             : data.friend_refresh === "busy"
               ? "（发送任务正在运行，好友列表稍后会自动刷新）"
               : data.friend_refresh === "running"
                 ? "（好友列表正在刷新中）"
                 : "（好友列表未自动刷新，可手动点刷新）";
+        const identityNote = data.identityLabel ? `（${data.identityLabel}）` : "";
         setStatus(
-          `已保存登录账号：${data.account?.username || ""}${refreshNote}`,
-          data.friend_refresh === "started" ? "success" : "warning",
+          `已保存登录账号：${data.account?.username || ""}${identityNote}${refreshNote}`,
+          data.verification === "pending" || data.friend_refresh === "started" ? "success" : "warning",
         );
         closeFrame();
         window.setTimeout(() => window.location.reload(), 800);
       } catch (error) {
+        setSaving(false);
+        if (error.payload && error.payload.leaseLost) {
+          // The workspace moved on while the operator was finishing the scan;
+          // report the real condition instead of a generic save failure.
+          setStatus("保存时本会话已不再持有登录工作区：请重新申请工作区后再保存。", "warning");
+          recoverLease();
+          return;
+        }
+        if (error.cancelled) {
+          statusHeldUntil = Date.now() + 8000;
+          setStatus(error.message);
+          return;
+        }
+        if (error.payload && error.payload.identityState) {
+          setStatus(`登录未保存：${identityFailureText(error)}`, error.payload.retryable ? "warning" : "danger");
+          return;
+        }
         setStatus(`保存登录账号失败：${error.message}`, "danger");
       }
     });
@@ -881,6 +1260,113 @@
     });
   });
 
+  // Defined after the pollers so the recovery path can safely call back into
+  // them (const bindings are not hoisted).
+  const trackWorkspace = (payload) => {
+    const next = payload || { state: "closed", active: false, position: 0, ticket: "" };
+    if (next.state === "active") {
+      acquiringWorkspace = false;
+    }
+    return next;
+  };
+  const applyWorkspace = (data, { openFrame = false, pollQr = false } = {}) => {
+    workspace = trackWorkspace(data.workspace);
+    // Granting a workspace starts a fresh QR wait even though this path
+    // assigns `workspace` first (so renderWorkspace's promote branch is skipped).
+    if (workspace.state === "active" && workspace.active) qrPollStartedAt = Date.now();
+    renderWorkspace(workspace);
+    if (openFrame && data.state !== "queued") loadFrame(true);
+    if (pollQr && data.state !== "queued" && workspace.active) refreshLoginQr(500);
+  };
+  const acquireWorkspace = async () => {
+    const wasAcquiring = acquiringWorkspace;
+    acquiringWorkspace = true;
+    try {
+      const data = await postForm("/login-desktop/open", { mode: "add" });
+      // A fresh grant cancels any pending re-acquisition: without this the timer
+      // armed during recovery still fires and reloads the shared login page.
+      window.clearTimeout(recoveryTimer);
+      recoveryTimer = null;
+      applyWorkspace(data, { openFrame: true, pollQr: true });
+    } catch (error) {
+      if (error.payload && error.payload.leaseLost) {
+        recoverLease({ acquire: false });
+        return;
+      }
+      if (!wasAcquiring) {
+        setStatus(`申请登录工作区失败：${error.message}`, "danger");
+      }
+      // Always report the failure: an automatic attempt that fails must not
+      // leave the stale "正在重新检查状态并尝试重新申请…" line on screen.
+      if (qrStatus) qrStatus.textContent = `重新申请登录工作区失败：${error.message}`;
+    }
+  };
+  // Any deliberate user action starts a fresh recovery budget; only this resets
+  // it, so an automatic loop can never renew its own budget.
+  const resetRecoveryBudget = () => {
+    window.clearTimeout(recoveryTimer);
+    recoveryTimer = null;
+    recoverAttempts = 0;
+    recoveringLease = false;
+  };
+  const recoverLease = ({ acquire = true } = {}) => {
+    // The status poll calls back into this function when the workspace is not
+    // ours, so a server that keeps contradicting itself must not recurse here.
+    if (recoveringLease) return;
+    recoveringLease = true;
+    window.clearTimeout(qrRefreshTimer);
+    window.clearTimeout(recoveryTimer);
+    recoveryTimer = null;
+    workspace = { state: "closed", active: false, position: 0, ticket: "" };
+    qrPollStartedAt = 0;
+    lastPromotedTicket = "";
+    closeFrame();
+    setRecoverVisible(true);
+    if (qrStatus) {
+      qrStatus.textContent = "本会话当前未持有登录工作区：正在重新检查状态并尝试重新申请…";
+    }
+    setQrButtons("刷新二维码");
+    Promise.resolve(pollStatus())
+      .catch(() => {})
+      .then(() => {
+        if (!acquire) {
+          recoveringLease = false;
+          return;
+        }
+        // Re-acquiring is safe even when someone else holds the workspace: the
+        // server puts us in the queue. The budget is set by a user action and is
+        // never renewed here, so a flapping lease cannot drive an endless cycle
+        // of POST /login-desktop/open (each one reloads the shared login page).
+        recoverAttempts += 1;
+        if (recoverAttempts <= RECOVER_BUDGET) {
+          const backoff = [5000, 15000][Math.min(recoverAttempts - 1, 1)];
+          recoveryTimer = window.setTimeout(() => {
+            recoveryTimer = null;
+            // A workspace granted in the meantime makes re-acquisition pointless.
+            if (workspace.state === "active" && workspace.active) {
+              recoveringLease = false;
+              return;
+            }
+            recoveringLease = false;
+            acquireWorkspace();
+          }, backoff);
+          return;
+        }
+        if (qrStatus) {
+          qrStatus.textContent = "登录工作区仍未分配给本会话：请从账号页点“重新登录”，或点“重新检查工作区”再试一次。";
+        }
+        setRecoverVisible(true);
+        setQrButtons("已停止，点此重试", { stopped: true });
+        recoveringLease = false;
+      });
+  };
+  document.querySelectorAll("[data-recover-login-workspace]").forEach((button) => {
+    button.addEventListener("click", () => {
+      resetRecoveryBudget();
+      recoverLease();
+    });
+  });
+
   if (section) section.addEventListener("toggle", () => { if (section.open) pollStatus(); });
   pollStatus();
   timer = window.setInterval(pollStatus, 10000);
@@ -889,6 +1375,7 @@
     if (workspace.state !== "active" || !workspace.active) return;
     workspace.remaining_seconds = Math.max(0, Number(workspace.remaining_seconds || 0) - 1);
     const remaining = workspace.remaining_seconds;
+    if (statusHeld()) return;
     setStatus(`登录工作区已分配给当前会话，剩余 ${remaining} 秒。完成扫码后请保存登录态。`, remaining <= 60 ? "warning" : "success");
   }, 1000);
   // Releasing the workspace when the page goes away lets the next operator in
@@ -954,7 +1441,8 @@
     const summary = picker.querySelector(".friend-picker-summary");
     const status = picker.querySelector(".friend-picker-status");
     let friends = parseJson(`friends-cache-${accountId}`);
-    let selected = new Set(parseJson(`selected-targets-${accountId}`));
+    const isGroupTarget = (value) => String(value || "").trim().startsWith("群聊：") || String(value || "").trim().startsWith("群聊:");
+    let selected = new Set(parseJson(`selected-targets-${accountId}`).filter((target) => !isGroupTarget(target)));
 
     const parseTargets = (value) =>
       [...new Set(
@@ -1007,9 +1495,11 @@
     };
 
     textarea?.addEventListener("input", () => {
-      selected = new Set(parseTargets(textarea.value));
+      selected = new Set(parseTargets(textarea.value).filter((target) => !isGroupTarget(target)));
       render();
     });
+    // Group targets live in their own textarea and are normalized by the server
+    // on save. Rewriting the value while typing would drop new lines and spaces.
     search?.addEventListener("input", render);
     // This element is the only place the last successful refresh time is shown,
     // so remember its initial text and keep it visible while reporting failures.
@@ -1125,6 +1615,7 @@
     if (!batchSummary) return;
     const ok = results.filter((item) => item.ok).length;
     const failed = results.filter((item) => !item.ok);
+    batchSummary.hidden = false;
     batchSummary.textContent = failed.length
       ? `成功 ${ok} 个，失败 ${failed.length} 个：${failed.map((item) => item.message).join("；")}`
       : `全部成功（${ok} 个账号）`;
@@ -1133,7 +1624,10 @@
     const pickers = [...document.querySelectorAll(".friend-picker")];
     const results = [];
     batchButton.disabled = true;
-    if (batchSummary) batchSummary.textContent = `正在刷新 ${pickers.length} 个账号…`;
+    if (batchSummary) {
+      batchSummary.hidden = false;
+      batchSummary.textContent = `正在刷新 ${pickers.length} 个账号…`;
+    }
     try {
       for (const picker of pickers) {
         if (typeof picker.refreshFriends !== "function") continue;
@@ -1146,11 +1640,43 @@
   });
 })();
 
+(() => {
+  const parse = (id) => { try { return JSON.parse(document.getElementById(id)?.textContent || '[]'); } catch { return []; } };
+  document.querySelectorAll('.group-picker').forEach((picker) => {
+    const id = picker.dataset.accountId, list = picker.querySelector('.group-picker-list');
+    const button = picker.closest('.group-target-editor')?.querySelector('.group-refresh-button');
+    const status = picker.closest('.group-target-editor')?.querySelector('[data-group-status]');
+    let groups = parse(`groups-cache-${id}`), bindings = parse(`group-bindings-${id}`);
+    const notices = picker.querySelector('.group-picker-notices');
+    const renderNotices = (targets = []) => { if (!notices) return; notices.textContent = ''; targets.filter((target) => target.status !== 'ok').forEach((target) => { const pill = document.createElement('span'); pill.className = `pill ${target.status === 'missing' ? 'danger' : 'warning'}`; pill.textContent = target.status === 'missing' ? '未找到此群' : `已改名为 ${target.name || ''}`; notices.appendChild(pill); }); };
+    const render = () => { list.textContent = ''; const selected = new Set(Object.values(bindings)); groups.forEach((group) => { const label=document.createElement('label'), box=document.createElement('input'), text=document.createElement('span'); box.type='checkbox'; box.name='group_bind'; box.value=group.conversationId; box.checked=selected.has(group.conversationId); text.textContent=`${group.name}（${String(group.conversationId)}）`; label.append(box,text); list.append(label); }); };
+    const poll = async () => { for(let i=0;i<200;i+=1) { await new Promise(r=>setTimeout(r,1000)); const job=await fetch(`${picker.dataset.refreshUrl}/status`,{credentials:'same-origin'}).then(r=>r.json()); if(job.state==='running') continue; return job; } return {state:'failed',error:'刷新超时'}; };
+    button?.addEventListener('click', async () => { button.disabled=true; if(status) status.textContent='正在刷新群列表…'; try { const body=new FormData(); body.set('csrf_token',picker.dataset.csrfToken); const response=await fetch(`${picker.dataset.refreshUrl}/async`,{method:'POST',body,credentials:'same-origin'}); if(!response.ok) throw new Error((await response.json()).error || '刷新失败'); const job=await poll(); if(job.state!=='done') throw new Error(job.error || '刷新失败'); groups=job.groups || []; renderNotices(job.targets || []); if(status) status.textContent=job.message || '群列表已刷新'; render(); } catch(error) { if(status) status.textContent=`刷新失败：${error.message}`; } finally { button.disabled=false; } });
+    render();
+  });
+})();
+
 window.addEventListener("DOMContentLoaded", () => {
   if (window.lucide) {
     window.lucide.createIcons({ attrs: { "aria-hidden": "true" } });
   }
 });
+
+// Chromium does not scroll a half-hidden item of a sideways-scrolling strip into view on Tab,
+// and for a textarea it only reveals the caret line. Only for Tab: a click, a tap that opens the
+// soft keyboard, or focus coming back to the window must not move the page.
+(() => {
+  let focusFromTab = false;
+  document.addEventListener("keydown", (event) => { focusFromTab = event.key === "Tab"; }, true);
+  document.addEventListener("pointerdown", () => { focusFromTab = false; }, true);
+  window.addEventListener("blur", () => { focusFromTab = false; });
+  document.addEventListener("focusin", (event) => {
+    const item = event.target;
+    if (!focusFromTab || !(item instanceof Element)) return;
+    if (!item.matches("textarea") && !item.closest(".settings-nav, .segmented-control")) return;
+    item.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+})();
 
 (() => {
   const form = document.querySelector("[data-schedule-preview-url]");
@@ -1215,5 +1741,62 @@ window.addEventListener("DOMContentLoaded", () => {
     } finally {
       button.disabled = false;
     }
+  });
+})();
+
+// "Immediate patrol" on the accounts page: start it, then poll until it ends
+// and reload so the server-rendered result is shown.
+(() => {
+  const buttons = document.querySelectorAll("[data-patrol-url]");
+  buttons.forEach((button) => {
+    const panel = button.closest("[data-patrol-panel]");
+    const message = panel ? panel.querySelector("[data-patrol-message]") : null;
+    const show = (text, level) => {
+      if (!message) return;
+      message.hidden = false;
+      message.className = `notice-inline${level ? ` ${level}` : ""}`;
+      message.textContent = text;
+    };
+    const poll = async () => {
+      for (let round = 0; round < 120; round += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        try {
+          const response = await fetch(button.dataset.patrolStatusUrl, { credentials: "same-origin" });
+          const data = await response.json().catch(() => ({}));
+          if (data.state && data.state !== "running") {
+            show(data.state === "done" ? `巡查完成：${data.conclusionLabel || ""}` : `巡查失败：${data.reason || ""}`, data.state === "done" ? "" : "warning");
+            setTimeout(() => window.location.reload(), 800);
+            return;
+          }
+        } catch (error) {
+          // keep polling; a transient error is not the patrol's result
+        }
+      }
+      show("巡查仍在进行，请稍后刷新页面查看结果。", "warning");
+      button.disabled = false;
+    };
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      show("正在巡查：检查登录态并读取好友列表，不会打开聊天或发送消息…", "");
+      try {
+        const body = new FormData();
+        body.set("csrf_token", button.dataset.csrfToken || "");
+        const response = await fetch(button.dataset.patrolUrl, {
+          method: "POST",
+          body,
+          credentials: "same-origin",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.status !== 202) {
+          show(data.error || `无法开始巡查（${response.status}）`, "warning");
+          button.disabled = false;
+          return;
+        }
+        poll();
+      } catch (error) {
+        show(`无法开始巡查：${error.message}`, "warning");
+        button.disabled = false;
+      }
+    });
   });
 })();

@@ -1,5 +1,7 @@
 import asyncio
 import json
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +17,55 @@ from webui import app as app_module
 from webui import login_lock
 
 ACCOUNT_ID = "1234567890"
+
+
+def trusted(uid=ACCOUNT_ID):
+    """A trusted identity as the creator self-identity endpoint reports it."""
+    return {"uid": uid, "source": "creator_im_user_token", "version": 1}
+
+
+def isolate_account_data(test_case, path):
+    """Point the account store at ``path`` whatever the ambient environment is.
+
+    ``get_userData()`` switches its data source when ``GITHUB_ACTIONS`` is set: it
+    reads the ``USER_DATA`` secret instead of the JSON file. A test that only
+    patches ``users_data_path`` therefore sees an empty account list on CI (and
+    the 404s that follow) while passing on a machine that happens to have local
+    account data. Pin the environment to LOCAL and drop the module-level cache so
+    these tests behave the same everywhere.
+    """
+    from utils import config as config_module
+
+    env_patch = patch.object(
+        config_module, "get_environment", return_value=config_module.Environment.LOCAL
+    )
+    env_patch.start()
+    test_case.addCleanup(env_patch.stop)
+
+    cached = config_module.userData
+    config_module.userData = None
+    test_case.addCleanup(lambda: setattr(config_module, "userData", cached))
+
+    path_patch = patch.object(config_module, "users_data_path", return_value=path)
+    path_patch.start()
+    test_case.addCleanup(path_patch.stop)
+
+
+def force_ephemeral_profiles(test_case):
+    """Keep a unit test on the throwaway-context path.
+
+    Production refreshes reuse the account's persistent browser profile; a unit
+    test must not launch a real browser, so pin the feature off and let the
+    existing ``get_browser`` fakes provide the context.
+    """
+    patcher = patch.object(
+        friends_module,
+        "normalize_persistent_profile_config",
+        return_value={"enabled": False, "root": ""},
+    )
+    patcher.start()
+    test_case.addCleanup(patcher.stop)
+
 
 
 def _json_export():
@@ -225,6 +276,9 @@ class _FakePlaywright:
 
 class AuthOnlyFetchTests(unittest.TestCase):
     """Exercise the real auth_only branch instead of stubbing it out."""
+
+    def setUp(self):
+        force_ephemeral_profiles(self)
 
     def _run(self, page, identity):
         context = _FakeContext(page)
@@ -553,12 +607,7 @@ class SavedLoginHealthTests(unittest.TestCase):
 
         self.users_path = Path(self.temp_dir.name) / "usersData.json"
         self.users_path.write_text("[]", encoding="utf-8")
-        self.users_patch = patch(
-            "utils.config.users_data_path",
-            return_value=self.users_path,
-        )
-        self.users_patch.start()
-        self.addCleanup(self.users_patch.stop)
+        isolate_account_data(self, self.users_path)
 
     def test_unverified_login_keeps_failure_markers(self):
         account, action = app_module.save_exported_login_result(
@@ -569,6 +618,7 @@ class SavedLoginHealthTests(unittest.TestCase):
             },
             is_healthy=False,
             verification_reason="登录态仍不可用",
+            identity=trusted(),
         )
 
         self.assertEqual("created", action)
@@ -589,6 +639,7 @@ class SavedLoginHealthTests(unittest.TestCase):
             },
             is_healthy=False,
             verification_reason="登录态仍不可用",
+            identity=trusted(),
         )
 
         account, action = app_module.save_exported_login_result(
@@ -598,6 +649,7 @@ class SavedLoginHealthTests(unittest.TestCase):
                 "cookies": [{"name": "sessionid", "value": "fresh", "domain": ".douyin.com", "path": "/"}],
             },
             is_healthy=True,
+            identity=trusted(),
         )
 
         self.assertEqual("updated", action)
@@ -606,7 +658,10 @@ class SavedLoginHealthTests(unittest.TestCase):
         self.assertNotIn("account_health", account)
         self.assertTrue(streak_state.preflight_account(account)["healthy"])
 
-    def test_relogin_identity_mismatch_is_recorded(self):
+    def test_relogin_with_a_different_trusted_uid_is_refused(self):
+        # Issue #41: a re-login whose trusted platform UID differs from the
+        # account's bound UID is a different person. It used to overwrite the
+        # account and record identity_mismatch; now nothing is written.
         app_module.save_exported_login_result(
             {
                 "unique_id": ACCOUNT_ID,
@@ -614,21 +669,27 @@ class SavedLoginHealthTests(unittest.TestCase):
                 "cookies": [{"name": "sessionid", "value": "v", "domain": ".douyin.com", "path": "/"}],
             },
             is_healthy=True,
+            identity=trusted(),
         )
 
-        account, _ = app_module.save_exported_login_result(
-            {
-                "unique_id": "9999999999",
-                "username": "Other",
-                "cookies": [{"name": "sessionid", "value": "w", "domain": ".douyin.com", "path": "/"}],
-            },
-            relogin_unique_id=ACCOUNT_ID,
-            is_healthy=True,
-        )
+        with self.assertRaises(app_module.IdentityConflict):
+            app_module.save_exported_login_result(
+                {
+                    "unique_id": "9999999999",
+                    "username": "Other",
+                    "cookies": [{"name": "sessionid", "value": "w", "domain": ".douyin.com", "path": "/"}],
+                },
+                relogin_unique_id=ACCOUNT_ID,
+                is_healthy=True,
+                identity=trusted("9999999999"),
+            )
 
-        self.assertEqual("9999999999", account["unique_id"])
-        self.assertEqual(ACCOUNT_ID, account["identity_mismatch"]["expected"])
-        self.assertEqual("9999999999", account["identity_mismatch"]["actual"])
+        stored = json.loads(self.users_path.read_text(encoding="utf-8"))
+        self.assertEqual(1, len(stored))
+        self.assertEqual(ACCOUNT_ID, stored[0]["unique_id"])
+        self.assertEqual(ACCOUNT_ID, stored[0]["platform_uid"])
+        self.assertEqual("v", stored[0]["cookies"][0]["value"])
+        self.assertNotIn("identity_mismatch", stored[0])
 
 
 class WebCookieLoginEndpointTests(unittest.TestCase):
@@ -753,9 +814,20 @@ class WebCookieLoginEndpointTests(unittest.TestCase):
             patch.object(
                 app_module,
                 "verify_login_result",
-                return_value=(True, "", {"unique_id": ACCOUNT_ID, "username": "Tester"}, ""),
+                return_value=(
+                    True,
+                    "",
+                    {
+                        "unique_id": ACCOUNT_ID,
+                        "username": "Tester",
+                        "display_id": "",
+                        "trusted": trusted(),
+                    },
+                    "",
+                ),
             ),
             patch.object(app_module, "account_by_unique_id", return_value=None),
+            patch.object(app_module, "get_userData", return_value=[]),
             patch.object(app_module, "save_exported_login_result", return_value=(saved, "created")) as save,
             patch.object(app_module, "update_web_user") as update_user,
             patch.object(app_module, "call_login_desktop", return_value={"ok": True}) as clear_state,
@@ -775,7 +847,7 @@ class WebCookieLoginEndpointTests(unittest.TestCase):
         self.assertEqual("/clear-login-state", clear_state.call_args.args[0])
         login_result = save.call_args.args[0]
         self.assertEqual("pasted", login_result["cookie_source"])
-        self.assertEqual(ACCOUNT_ID, login_result["unique_id"])
+        self.assertEqual(ACCOUNT_ID, save.call_args.kwargs["identity"]["uid"])
 
 
 class FriendRefreshEndpointTests(unittest.TestCase):
@@ -808,12 +880,7 @@ class FriendRefreshEndpointTests(unittest.TestCase):
             json_module.dumps([self.account], ensure_ascii=False),
             encoding="utf-8",
         )
-        self.path_patch = patch(
-            "utils.config.users_data_path",
-            return_value=self.users_path,
-        )
-        self.path_patch.start()
-        self.addCleanup(self.path_patch.stop)
+        isolate_account_data(self, self.users_path)
         self.client = TestClient(app_module.app)
         self.addCleanup(lambda: app_module._friend_refresh_active.discard(ACCOUNT_ID))
 
@@ -892,7 +959,7 @@ class FriendRefreshEndpointTests(unittest.TestCase):
         self.assertTrue(body["retryable"])
         self.assertEqual(["Old Friend"], self._stored_account()["friends_cache"])
 
-    def test_empty_result_keeps_previous_friends_cache(self):
+    def test_incomplete_result_keeps_previous_friends_cache(self):
         self.assertEqual(["Old Friend"], self.account["friends_cache"])
 
         def fake_fetch(account):
@@ -905,12 +972,80 @@ class FriendRefreshEndpointTests(unittest.TestCase):
 
         body = response.json()
         self.assertEqual(502, response.status_code)
-        self.assertEqual("empty_result", body["category"])
+        # A read that stopped early is not proof the list shrank, so it keeps the
+        # last good cache instead of wiping the friend picker.
+        self.assertEqual("incomplete_scan", body["category"])
         self.assertTrue(body["retryable"])
         self.assertEqual(self.account["friends_cache_updated_at"], body["previousUpdatedAt"])
         stored = self._stored_account()
         self.assertEqual(["Old Friend"], stored["friends_cache"])
         self.assertEqual("2026-01-01T00:00:00", stored["friends_cache_updated_at"])
+
+    def test_incomplete_scan_reason_reaches_the_console(self):
+        def fake_fetch(account):
+            del account
+            return friends_module.FriendScanResult(
+                ["Alice"],
+                reason="列表滚动没有继续推进",
+            )
+
+        response, _ = self._run_refresh(
+            patch.object(app_module, "fetch_account_friends", side_effect=fake_fetch),
+        )
+
+        body = response.json()
+        self.assertEqual(502, response.status_code)
+        self.assertEqual("incomplete_scan", body["category"])
+        self.assertFalse(body["scan_complete"])
+        self.assertIn("列表滚动没有继续推进", body["error"])
+        # The partial names never reach the picker.
+        stored = self._stored_account()
+        self.assertEqual(["Old Friend"], stored["friends_cache"])
+        self.assertEqual("2026-01-01T00:00:00", stored["friends_cache_updated_at"])
+
+    def test_complete_empty_scan_keeps_previous_friends_cache(self):
+        def fake_fetch(account):
+            del account
+            return friends_module.FriendScanResult(complete=True)
+
+        response, _ = self._run_refresh(
+            patch.object(app_module, "fetch_account_friends", side_effect=fake_fetch),
+        )
+
+        body = response.json()
+        self.assertEqual(502, response.status_code)
+        self.assertEqual("empty_result", body["category"])
+        stored = self._stored_account()
+        self.assertEqual(["Old Friend"], stored["friends_cache"])
+        self.assertEqual("2026-01-01T00:00:00", stored["friends_cache_updated_at"])
+
+    def test_empty_scan_without_previous_cache_writes_nothing(self):
+        # An empty read is never proof the list is empty, so it must not stamp a
+        # fresh refresh time on an account that had no cache to begin with.
+        import json as json_module
+
+        self.users_path.write_text(
+            json_module.dumps(
+                [{**self.account, "friends_cache": [], "friends_cache_updated_at": ""}],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        def fake_fetch(account):
+            del account
+            return friends_module.FriendScanResult(complete=True)
+
+        response, _ = self._run_refresh(
+            patch.object(app_module, "fetch_account_friends", side_effect=fake_fetch),
+        )
+
+        body = response.json()
+        self.assertEqual(502, response.status_code)
+        self.assertEqual("empty_result", body["category"])
+        stored = self._stored_account()
+        self.assertEqual([], stored.get("friends_cache") or [])
+        self.assertEqual("", stored.get("friends_cache_updated_at") or "")
 
     def test_complete_scan_updates_cache_and_reports_index(self):
         def fake_fetch(account):
@@ -978,12 +1113,63 @@ class FriendRefreshEndpointTests(unittest.TestCase):
 
         body = response.json()
         self.assertEqual(504, response.status_code)
-        self.assertEqual("network_unavailable", body["category"])
+        # Exceeding the read budget is an incomplete read, not a transport error.
+        self.assertEqual("incomplete_scan", body["category"])
+        self.assertFalse(body["scan_complete"])
         self.assertEqual(["Old Friend"], self._stored_account()["friends_cache"])
+
+    def test_async_timeout_reports_an_incomplete_scan(self):
+        async def fake_wait_for(awaitable, timeout):
+            del timeout
+            if hasattr(awaitable, "close"):
+                awaitable.close()
+            raise asyncio.TimeoutError()
+
+        async def fake_fetch(account, on_progress=None):
+            del account, on_progress
+            return friends_module.FriendScanResult(["Alice"], complete=True)
+
+        job = {}
+        with (
+            patch.object(app_module, "current_user", return_value="admin"),
+            patch.object(app_module, "current_principal", return_value=self.principal),
+            patch.object(app_module, "validate_csrf", return_value=True),
+            patch.object(app_module.asyncio, "wait_for", side_effect=fake_wait_for),
+            patch.object(app_module, "fetch_account_friends", side_effect=fake_fetch),
+        ):
+            response = self.client.post(
+                f"/accounts/{ACCOUNT_ID}/friends/refresh/async",
+                data={"csrf_token": "t"},
+            )
+            self.assertEqual(202, response.status_code)
+            for _ in range(200):
+                job = self.client.get(
+                    f"/accounts/{ACCOUNT_ID}/friends/refresh/status"
+                ).json()
+                if job.get("state") != "running":
+                    break
+                time.sleep(0.02)
+
+        # The background job must classify a budget overrun as an incomplete
+        # read, exactly like the synchronous route.
+        self.assertEqual("failed", job.get("state"))
+        self.assertEqual("incomplete_scan", job.get("category"))
+        self.assertFalse(job.get("scanComplete", True))
+        self.assertIn("读取超时", job.get("error", ""))
+        self.assertEqual(["Old Friend"], self._stored_account()["friends_cache"])
+        self.assertEqual(
+            "2026-01-01T00:00:00", self._stored_account()["friends_cache_updated_at"]
+        )
 
     def test_successful_refresh_writes_cache(self):
         response, _ = self._run_refresh(
-            patch.object(app_module, "fetch_account_friends", return_value=["Alice", "Bob"]),
+            patch.object(
+                app_module,
+                "fetch_account_friends",
+                return_value=friends_module.FriendScanResult(
+                    ["Alice", "Bob"], complete=True
+                ),
+            ),
         )
 
         body = response.json()
@@ -999,6 +1185,42 @@ class FriendRefreshEndpointTests(unittest.TestCase):
 class LoginDesktopQrPayloadTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(login_desktop_server.app)
+        # GET /qr only reads a running browser; pretend one is up.
+        for target, value in (("context", object()), ("_context_is_closed", lambda: False)):
+            patcher = patch.object(login_desktop_server.manager, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_qr_does_not_launch_a_browser(self):
+        with (
+            patch.object(login_desktop_server.manager, "context", None),
+            patch.object(login_desktop_server.manager, "start") as start,
+        ):
+            response = self.client.get("/qr?wait=1")
+        self.assertEqual(202, response.status_code)
+        self.assertEqual("qr_not_ready", response.json()["state"])
+        start.assert_not_called()
+
+    def test_qr_probe_error_is_not_an_upstream_failure(self):
+        # A navigation or closed page mid-probe must read as "not ready", or the
+        # proxy turns the 500 into "Douyin unreachable" and the page stops.
+        async def broken(page):
+            raise RuntimeError("Execution context was destroyed")
+
+        class FakePage:
+            def is_closed(self):
+                return False
+
+        async def fake_page():
+            return FakePage()
+
+        with (
+            patch.object(login_desktop_server.manager, "_get_active_page", side_effect=fake_page),
+            patch.object(login_desktop_server, "_probe_login_qr", side_effect=broken),
+        ):
+            response = self.client.get("/qr?wait=1")
+        self.assertEqual(202, response.status_code)
+        self.assertEqual("qr_not_ready", response.json()["state"])
 
     def test_qr_reports_not_ready_with_retry_after(self):
         class Candidate:
@@ -1029,8 +1251,75 @@ class LoginDesktopQrPayloadTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(202, response.status_code)
         self.assertEqual("qr_not_ready", body["state"])
-        self.assertEqual(2, body["retry_after"])
+        self.assertEqual(1, body["retry_after"])
         self.assertTrue(body["retryable"])
+
+    def test_qr_wait_holds_the_request_until_the_code_appears(self):
+        calls = {"n": 0}
+
+        async def probe(page):
+            calls["n"] += 1
+            return ("qr", b"png-bytes") if calls["n"] >= 3 else ("not_ready", None)
+
+        class FakePage:
+            def is_closed(self):
+                return False
+
+        async def fake_page():
+            return FakePage()
+
+        with (
+            patch.object(login_desktop_server.manager, "_get_active_page", side_effect=fake_page),
+            patch.object(login_desktop_server, "_probe_login_qr", side_effect=probe),
+        ):
+            response = self.client.get("/qr?wait=5")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("image/png", response.headers["content-type"])
+        self.assertEqual(3, calls["n"])
+
+    def test_qr_wait_is_bounded_when_the_page_hangs(self):
+        async def hang(page):
+            await asyncio.sleep(60)
+
+        async def fake_page():
+            return object()
+
+        started = time.monotonic()
+        with (
+            patch.object(login_desktop_server, "QR_MAX_WAIT_SECONDS", 1),
+            patch.object(login_desktop_server.manager, "_get_active_page", side_effect=fake_page),
+            patch.object(login_desktop_server, "_probe_login_qr", side_effect=hang),
+        ):
+            response = self.client.get("/qr?wait=30")
+
+        self.assertEqual(202, response.status_code)
+        self.assertEqual("qr_not_ready", response.json()["state"])
+        # One bounded probe (at least 3s) past the 1s wait, never the 60s hang.
+        self.assertLess(time.monotonic() - started, 8)
+
+    def test_close_keeps_the_browser_cache_but_drops_the_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp)
+            for relative in ("Default/Network/Cookies", "Default/Local Storage/leveldb/x.log",
+                             "Default/IndexedDB/https_creator.douyin.com_0/x", "Default/Login Data",
+                             "Default/Cache/Cache_Data/f_0001", "Default/Code Cache/js/abc"):
+                target = profile / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"x")
+            with (
+                patch.object(login_desktop_server, "PROFILE_DIR", profile),
+                patch.object(login_desktop_server.manager, "context", None),
+                patch.object(login_desktop_server.manager, "page", None),
+                patch.object(login_desktop_server.manager, "playwright", None),
+            ):
+                response = self.client.post("/close")
+
+            self.assertEqual(200, response.status_code)
+            for gone in ("Default/Network/Cookies", "Default/Local Storage", "Default/IndexedDB", "Default/Login Data"):
+                self.assertFalse((profile / gone).exists(), gone)
+            for kept in ("Default/Cache/Cache_Data/f_0001", "Default/Code Cache/js/abc"):
+                self.assertTrue((profile / kept).exists(), kept)
 
     def test_qr_reports_busy_when_page_lock_is_held(self):
         with patch.object(
@@ -1321,6 +1610,13 @@ class ReloginOverwriteTests(unittest.TestCase):
                 "cookies": [{"name": "old", "value": "1"}],
             }
         ]
+        # The legacy row's own saved login proves it is the same platform UID.
+        legacy_check = {
+            "account_ref": "acc-1",
+            "fingerprint": app_module.account_identity.record_fingerprint(accounts[0]),
+            "uid": "999",
+            "reason": "",
+        }
 
         def fake_update(mutator, **_kwargs):
             return mutator(accounts)
@@ -1337,19 +1633,22 @@ class ReloginOverwriteTests(unittest.TestCase):
                 },
                 relogin_account_ref="acc-1",
                 relogin_unique_id="123",
+                identity=trusted("999"),
+                legacy_check=legacy_check,
             )
 
-        # Identity and login state are overwritten...
-        self.assertEqual("999", account["unique_id"])
+        # The login state is overwritten and the trusted UID is bound, while the
+        # stored key, the operator's targets and the send ledger survive and no
+        # second row is created for the same person.
+        self.assertEqual("123", account["unique_id"])
+        self.assertEqual("999", account["platform_uid"])
         self.assertEqual("New", account["username"])
-        # ...while the operator's targets and send ledger survive, and no second
-        # row is created for the same person.
         self.assertEqual(["A", "B"], account["targets"])
         self.assertEqual({"A": {"done": True}}, account["target_states"])
         self.assertEqual(1, len(accounts))
         self.assertEqual("updated", action)
 
-    def test_differing_uid_is_accepted_so_the_account_is_overwritten(self):
+    def test_verification_reports_the_trusted_uid_not_the_page_id(self):
         import asyncio
         from unittest.mock import AsyncMock
 
@@ -1361,11 +1660,18 @@ class ReloginOverwriteTests(unittest.TestCase):
                 {"name": "sid_guard", "value": "y"},
             ],
         }
-        with patch.object(
-            app_module,
-            "verify_account_session",
-            new=AsyncMock(
-                return_value={"identity": {"unique_id": "999", "username": "Tester"}}
+        with (
+            patch.object(
+                app_module,
+                "verify_account_session",
+                new=AsyncMock(
+                    return_value={"identity": {"unique_id": "999", "display_id": "abc999", "username": "Tester"}}
+                ),
+            ),
+            patch.object(
+                app_module.account_identity,
+                "fetch_trusted_identity",
+                return_value=trusted("7000000000000001"),
             ),
         ):
             verified, reason, identity, category = asyncio.run(
@@ -1376,12 +1682,12 @@ class ReloginOverwriteTests(unittest.TestCase):
                 )
             )
 
-        # Refusing here is what used to leave a duplicate row behind, so a
-        # differing id must come back as a successful verification.
         self.assertTrue(verified)
         self.assertEqual("", reason)
         self.assertEqual("", category)
-        self.assertEqual("999", identity["unique_id"])
+        self.assertEqual("7000000000000001", identity["unique_id"])
+        self.assertEqual("7000000000000001", identity["trusted"]["uid"])
+        self.assertEqual("abc999", identity["display_id"])
 
 
 class ScheduleWindowLockTests(unittest.TestCase):
@@ -1562,12 +1868,7 @@ class UnverifiedLoginAttributionTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.users_path = Path(self.temp_dir.name) / "usersData.json"
         self.users_path.write_text("[]", encoding="utf-8")
-        self.users_patch = patch(
-            "utils.config.users_data_path",
-            return_value=self.users_path,
-        )
-        self.users_patch.start()
-        self.addCleanup(self.users_patch.stop)
+        isolate_account_data(self, self.users_path)
 
     def _save(self, **kwargs):
         account, _action = app_module.save_exported_login_result(
@@ -1577,6 +1878,7 @@ class UnverifiedLoginAttributionTests(unittest.TestCase):
                 "cookies": [{"name": "sessionid", "value": "v", "domain": ".douyin.com", "path": "/"}],
             },
             is_healthy=False,
+            identity=trusted(),
             **kwargs,
         )
         return account
@@ -1671,6 +1973,9 @@ class UnverifiedLoginAttributionTests(unittest.TestCase):
 
 class IdentityReadBudgetTests(unittest.TestCase):
     """The identity read must get the full render budget and one retry."""
+
+    def setUp(self):
+        force_ephemeral_profiles(self)
 
     def _run(self, failures):
         seen = []

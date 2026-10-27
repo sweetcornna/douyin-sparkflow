@@ -1,0 +1,62 @@
+name: Tests
+
+# Verification only: runs the Python and Node test suites on every push and pull
+# request. It never sends anything and never reads a secret; offline browser
+# fixtures run against a locally installed Chromium with no account or network.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is what the Playwright Docker image (jammy) ships and what the
+        # server runs; 3.11 catches anything newer-only.
+        python-version: ["3.10", "3.11"]
+    defaults:
+      run:
+        working-directory: DouYinSparkFlow
+    env:
+      # The suite must not depend on real account data; an empty array keeps it
+      # hermetic and doubles as a check that nothing requires accounts to boot.
+      USER_DATA: "[]"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Install offline Chromium fixture runtime
+        run: python -m playwright install --with-deps chromium
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Byte-compile the application
+        run: python -m compileall -q core webui utils scripts main.py login_desktop_server.py
+
+  node-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Run protocol sender tests
+        run: node --test DouYinSparkFlow/tests/test_protocol_sender_helpers.mjs

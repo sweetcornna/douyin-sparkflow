@@ -53,6 +53,29 @@ LOGIN_PREFLIGHT_TIMEOUT_SECONDS = max(
 LOGIN_NETWORK_CACHE_SECONDS = max(
     0, int(os.getenv("LOGIN_DESKTOP_NETWORK_CACHE_SECONDS", "30"))
 )
+# Everything in the profile that can carry a signed-in session or personal data.
+# The HTTP and code caches stay, so the next login page loads warm.
+LOGIN_DATA_PATHS = (
+    "Default/Cookies*",
+    "Default/Network/Cookies*",
+    "Default/Network/Trust Tokens*",
+    "Default/Local Storage",
+    "Default/Session Storage",
+    "Default/Sessions",
+    "Default/IndexedDB",
+    "Default/Service Worker",
+    "Default/WebStorage",
+    "Default/SharedStorage*",
+    "Default/File System",
+    "Default/Storage",
+    "Default/databases",
+    "Default/blob_storage",
+    "Default/Login Data*",
+    "Default/Web Data*",
+    "Default/Account Web Data*",
+)
+# Upper bound for one GET /qr?wait=N; the WebUI proxy waits a little longer.
+QR_MAX_WAIT_SECONDS = 12
 GENERIC_WWW_NAMES = {
     "",
     "我的",
@@ -74,6 +97,20 @@ GENERIC_WWW_NAMES = {
     "海量优质视频内容",
     "抖音精选电脑版",
 }
+
+
+def _purge_login_data(profile_dir):
+    """Delete the signed-in session from a closed profile, keeping its caches."""
+    for pattern in LOGIN_DATA_PATHS:
+        # Globs cover SQLite companions (-journal, -wal, -shm) and variants.
+        for target in Path(profile_dir).glob(pattern):
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    target.unlink()
+            except OSError:
+                logger.warning("Could not remove login data %s", target.name, exc_info=True)
 
 
 def _api_bind_address():
@@ -314,6 +351,9 @@ class LoginDesktopManager:
             if self.context and not self._context_is_closed():
                 return
             PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+            # A browser that crashed or was killed never went through stop(), so
+            # its session may still be on disk; never start on someone's login.
+            await asyncio.to_thread(_purge_login_data, PROFILE_DIR)
             if self.playwright:
                 try:
                     await self.playwright.stop()
@@ -357,6 +397,11 @@ class LoginDesktopManager:
                 **launch_options,
             )
             self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+            try:
+                # Fewer animations means the 2-core host renders the QR sooner.
+                await self.page.emulate_media(reduced_motion="reduce")
+            except Exception:
+                pass
 
     def _context_is_closed(self):
         return not self.context or getattr(self.context, "_impl_obj", None) is None
@@ -400,6 +445,8 @@ class LoginDesktopManager:
                 self.playwright = None
             if clear_profile and PROFILE_DIR.exists():
                 shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+            elif PROFILE_DIR.exists():
+                await asyncio.to_thread(_purge_login_data, PROFILE_DIR)
             self._status_cache = None
             self._status_checked_at = 0.0
 
@@ -633,12 +680,14 @@ class LoginDesktopManager:
     async def _ensure_login_form_locked(self):
         """Guarantee the workspace shows the login form, clearing stale sessions."""
         page = await self._get_active_page()
-        state = await self._login_page_state(page)
         reset = False
-        if state.get("logged_in"):
-            cleared = await self._clear_login_cookies(page, self.context)
-            reset = True
-            logger.info("Login page showed an existing session; cleared cookies=%s", cleared)
+        # A freshly started browser sits on about:blank; there is no session to probe.
+        if str(page.url or "").startswith("http"):
+            state = await self._login_page_state(page)
+            if state.get("logged_in"):
+                cleared = await self._clear_login_cookies(page, self.context)
+                reset = True
+                logger.info("Login page showed an existing session; cleared cookies=%s", cleared)
         await self._goto_login_page(page)
         page = await self._get_active_page()
         return {
@@ -838,18 +887,15 @@ async def collect_www_login_result(page, context):
 
     if not username:
         username = "抖音官网账号"
-    uid_cookie = ""
-    for cookie in cookies:
-        if cookie.get("name") in {"uid_tt", "uid_tt_ss", "sid_uid", "passport_csrf_token"}:
-            uid_cookie = str(cookie.get("value") or "")
-            if uid_cookie:
-                break
-    suffix = "".join(ch for ch in uid_cookie if ch.isalnum())[:24]
-    unique_id = f"web-self-{suffix or username}"
+    # No account ID is derived here: cookie fragments (uid_tt, csrf tokens) are
+    # not the platform UID. The Web console reads the trusted UID from the
+    # cookies and refuses the save when it cannot (issue #41).
     return {
-        "unique_id": unique_id,
+        "unique_id": "",
+        "display_id": "",
         "username": username,
         "cookies": cookies,
+        "identity_source": "www_fallback",
     }
 
 
@@ -963,7 +1009,9 @@ async def reset():
 
 @app.post("/close")
 async def close():
-    await manager.stop(clear_profile=True)
+    # Drop the signed-in session but keep the browser caches, so the next
+    # "add account" loads the login page warm. /reset still wipes everything.
+    await manager.stop(clear_profile=False)
     return {"ok": True}
 
 
@@ -1025,11 +1073,46 @@ async def export():
     return {"ok": True, "result": result}
 
 
+async def _probe_login_qr(page):
+    """One look at the login page: an expired notice, a QR image, a session, or nothing."""
+    try:
+        expired = await page.locator('[class*="qrcode_expired"]').count()
+        expired_visible = bool(expired) and await page.locator('[class*="qrcode_expired"]').first.is_visible()
+    except Exception:
+        expired_visible = False
+    if expired_visible:
+        return "expired", None
+    qr = await manager._extract_login_qr(page)
+    if qr is not None:
+        try:
+            data = await qr.screenshot(type="png", timeout=5000)
+        except Exception:
+            data = None
+        if data:
+            return "qr", data
+    state = await manager._login_page_state(page)
+    if state.get("logged_in"):
+        return "logged_in", None
+    return "not_ready", None
+
+
 @app.get("/qr")
-async def login_qr():
-    if manager._page_operation_lock.locked():
-        code, message = QR_ERROR_SPECS["qr_page_busy"]
-        return _qr_error(code, "qr_page_busy", message, retry_after=2)
+async def login_qr(wait: float = 0):
+    # wait > 0 holds the request until a QR appears (up to the limit) instead of
+    # making the browser poll; every page call is bounded by that deadline, so a
+    # busy renderer yields "not ready" rather than hanging the request.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + min(max(0.0, wait), QR_MAX_WAIT_SECONDS)
+    while manager._page_operation_lock.locked():
+        if loop.time() >= deadline:
+            code, message = QR_ERROR_SPECS["qr_page_busy"]
+            return _qr_error(code, "qr_page_busy", message, retry_after=1)
+        await asyncio.sleep(0.25)
+    if not manager.context or manager._context_is_closed():
+        # Reading the QR code must not launch a browser (for example right
+        # after /close); only opening the workspace does that.
+        code, message = QR_ERROR_SPECS["qr_not_ready"]
+        return _qr_error(code, "qr_not_ready", message, retry_after=1)
     try:
         page = await manager._get_active_page()
     except LoginNetworkError as exc:
@@ -1037,41 +1120,46 @@ async def login_qr():
             status_code=502,
             detail={"code": "LOGIN_NETWORK_UNAVAILABLE", "message": str(exc), "checks": exc.checks},
         ) from exc
-    try:
-        expired = await page.locator('[class*="qrcode_expired"]').count()
-        expired_visible = bool(expired) and await page.locator('[class*="qrcode_expired"]').first.is_visible()
-    except Exception:
-        expired_visible = False
-    if expired_visible:
+
+    outcome, data = "not_ready", None
+    while True:
+        remaining = deadline - loop.time()
+        try:
+            outcome, data = await asyncio.wait_for(_probe_login_qr(page), timeout=max(remaining, 3.0))
+        except asyncio.TimeoutError:
+            outcome, data = "not_ready", None
+        except Exception:
+            # The page navigated or closed mid-probe; that is "not ready yet",
+            # not an upstream failure that would stop the page's QR wait.
+            outcome, data = "not_ready", None
+        if outcome != "not_ready" or loop.time() + 0.5 >= deadline:
+            break
+        # A page operation (open, refresh) or a closed page ends this wait early.
+        if manager._page_operation_lock.locked() or page.is_closed():
+            break
+        await asyncio.sleep(0.5)
+
+    if outcome == "expired":
         code, message = QR_ERROR_SPECS["qr_expired"]
         return _qr_error(code, "qr_expired", message)
-
-    qr = await manager._extract_login_qr(page)
-    if qr is not None:
-        try:
-            data = await qr.screenshot(type="png")
-        except Exception:
-            data = None
-        if data:
-            return Response(
-                content=data,
-                media_type="image/png",
-                headers={"Cache-Control": "no-store, max-age=0"},
-            )
-
-    state = await manager._login_page_state(page)
-    if state.get("logged_in"):
+    if outcome == "qr":
+        return Response(
+            content=data,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
+    if outcome == "logged_in":
         # 202 keeps this retryable end to end: the WebUI proxy forwards JSON for
         # this status instead of wrapping it as an image.
         return _qr_error(
             202,
             "qr_logged_in",
             "检测到浏览器里还保留着登录状态，已重置，正在生成新的二维码",
-            retry_after=2,
+            retry_after=1,
             logged_in=True,
         )
     code, message = QR_ERROR_SPECS["qr_not_ready"]
-    return _qr_error(code, "qr_not_ready", message, retry_after=2)
+    return _qr_error(code, "qr_not_ready", message, retry_after=1)
 
 
 @app.get("/debug/screenshot")

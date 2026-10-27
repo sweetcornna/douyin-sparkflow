@@ -698,22 +698,30 @@ class RuntimeHardeningTests(unittest.TestCase):
             lock_path.write_text("99999999\n", encoding="utf-8")
             context = multiprocessing.get_context("spawn")
             start_event = context.Event()
+            release_event = context.Event()
+            ready_queue = context.Queue()
             queue = context.Queue()
             processes = [
                 context.Process(
                     target=_try_task_lock_worker,
-                    args=(str(lock_path), start_event, queue),
+                    args=(str(lock_path), ready_queue, start_event, release_event, queue),
                 )
                 for _ in range(2)
             ]
             for process in processes:
                 process.start()
-            start_event.set()
-            for process in processes:
-                process.join(timeout=10)
+            try:
+                for _ in processes:
+                    ready_queue.get(timeout=60)
+                start_event.set()
+                outcomes = sorted(queue.get(timeout=30) for _ in processes)
+            finally:
+                start_event.set()
+                release_event.set()
+                for process in processes:
+                    process.join(timeout=30)
 
             self.assertEqual([0, 0], [process.exitcode for process in processes])
-            outcomes = sorted(queue.get(timeout=2) for _ in processes)
 
         self.assertEqual(["acquired", "blocked"], outcomes)
 
@@ -1053,6 +1061,13 @@ class RuntimeHardeningTests(unittest.TestCase):
             return FakePlaywright(), FakeBrowser()
 
         with (
+            # Production reuses the account's persistent profile; this test
+            # covers the throwaway-context cleanup path with a fake browser.
+            patch.object(
+                friends,
+                "normalize_persistent_profile_config",
+                return_value={"enabled": False, "root": ""},
+            ),
             patch.object(friends, "get_browser", side_effect=fake_get_browser),
             patch.object(friends, "collect_friend_names", new=AsyncMock(return_value=["Alice"])),
         ):
@@ -1149,12 +1164,17 @@ def _create_web_user_worker(path, username, delay):
         users.create_web_user(username, "password")
 
 
-def _try_task_lock_worker(path, start_event, queue):
-    start_event.wait()
+def _try_task_lock_worker(path, ready_queue, start_event, release_event, queue):
+    # Report readiness only after the heavy imports are done, so the race starts
+    # when both processes can actually reach the lock. The holder keeps the lock
+    # until the test has collected both outcomes instead of a fixed sleep, which
+    # a slow second process could outlast on a busy machine.
+    ready_queue.put(True)
+    start_event.wait(30)
     try:
         with tasks.task_run_lock(Path(path)):
             queue.put("acquired")
-            time.sleep(0.4)
+            release_event.wait(30)
     except tasks.TaskRunAlreadyInProgress:
         queue.put("blocked")
 
@@ -1199,8 +1219,8 @@ class StateLockingHardeningTests(unittest.TestCase):
             first.start()
             time.sleep(0.05)
             second.start()
-            first.join(timeout=10)
-            second.join(timeout=10)
+            first.join(timeout=60)
+            second.join(timeout=60)
 
             self.assertEqual(0, first.exitcode)
             self.assertEqual(0, second.exitcode)
@@ -1225,8 +1245,8 @@ class StateLockingHardeningTests(unittest.TestCase):
             first.start()
             time.sleep(0.05)
             second.start()
-            first.join(timeout=10)
-            second.join(timeout=10)
+            first.join(timeout=60)
+            second.join(timeout=60)
 
             self.assertEqual(0, first.exitcode)
             self.assertEqual(0, second.exitcode)
@@ -1251,8 +1271,8 @@ class StateLockingHardeningTests(unittest.TestCase):
             first.start()
             time.sleep(0.05)
             second.start()
-            first.join(timeout=10)
-            second.join(timeout=10)
+            first.join(timeout=60)
+            second.join(timeout=60)
 
             self.assertEqual(0, first.exitcode)
             self.assertEqual(0, second.exitcode)
@@ -1276,32 +1296,48 @@ class DependencyHardeningTests(unittest.TestCase):
         self.assertIn("./state/login-api:/run/login-api", compose)
 
     def test_requirements_pin_vulnerability_fix_versions(self):
+        # Each package must stay pinned at or above the release that fixed a
+        # known vulnerability; newer pins (e.g. from Dependabot) are fine.
         root = Path(__file__).resolve().parents[1]
-        main_requirements = (root / "requirements.txt").read_text(encoding="utf-8")
-        web_requirements = (root / "requirements-web.txt").read_text(encoding="utf-8")
 
-        for requirement in (
-            "fastapi==0.141.1",
-            "filelock==3.32.6",
-            "idna==3.19",
-            "Pygments==2.21.0",
-            "python-multipart==0.0.32",
-            "requests==2.34.2",
-            "starlette==1.6.0",
-            "urllib3==2.7.0",
-            "uvicorn==0.52.4",
-        ):
-            self.assertIn(requirement, main_requirements)
+        def pins(name):
+            result = {}
+            for line in (root / name).read_text(encoding="utf-8").splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "==" in line:
+                    package, version = line.split("==", 1)
+                    result[package.strip().lower()] = version.strip()
+            return result
 
-        for requirement in (
-            "fastapi==0.141.1",
-            "filelock==3.32.6",
-            "python-multipart==0.0.32",
-            "starlette==1.6.0",
-            "uvicorn==0.52.4",
-        ):
-            self.assertIn(requirement, web_requirements)
+        def as_tuple(version):
+            return tuple(int(part) for part in version.split("."))
 
+        minimums = {
+            "requirements.txt": {
+                "fastapi": "0.141.1",
+                "filelock": "3.32.6",
+                "idna": "3.19",
+                "pygments": "2.21.0",
+                "python-multipart": "0.0.32",
+                "requests": "2.34.2",
+                "starlette": "1.6.0",
+                "urllib3": "2.7.0",
+                "uvicorn": "0.52.4",
+            },
+            "requirements-web.txt": {
+                "fastapi": "0.141.1",
+                "filelock": "3.32.6",
+                "python-multipart": "0.0.32",
+                "starlette": "1.6.0",
+                "uvicorn": "0.52.4",
+            },
+        }
+        for name, floors in minimums.items():
+            pinned = pins(name)
+            for package, floor in floors.items():
+                with self.subTest(file=name, package=package):
+                    self.assertIn(package, pinned)
+                    self.assertGreaterEqual(as_tuple(pinned[package]), as_tuple(floor))
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,11 +4,11 @@
 
 **抖音多账号火花自动维护系统**
 
-一个智能化的抖音好友互动管理工具，自动维护好友火花标记，支持多账号管理、定时发送、Web 控制台
+自托管的抖音续火花工具：每天在发送窗口内给选定的好友和群聊发一条消息，支持多账号、发送前巡查、结果推送和 Web 控制台
 
 [![GitHub stars](https://img.shields.io/github/stars/halfwaystudent/douyin-sparkflow?style=social)](https://github.com/halfwaystudent/douyin-sparkflow)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Discussion-blue)](https://linux.do)
 
 [功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用文档](#-使用文档) • [部署指南](#-部署指南) • [社区讨论](https://linux.do)
@@ -29,45 +29,48 @@
 
 <div align="center">
   <img src="DouYinSparkFlow/docs/images/screenshot-dark.png" alt="主界面预览 - 暗色模式" width="800"/>
-  <p><i>Web 管理控制台 - 仪表盘视图（暗色主题）</i></p>
+  <p><i>Web 管理控制台 - 今日概览（暗色主题，演示数据）</i></p>
 </div>
 
 ### ☀️ 亮色模式
 
 <div align="center">
   <img src="DouYinSparkFlow/docs/images/screenshot-light.png" alt="主界面预览 - 亮色模式" width="800"/>
-  <p><i>Web 管理控制台 - 仪表盘视图（亮色主题）</i></p>
+  <p><i>Web 管理控制台 - 今日概览（亮色主题，演示数据）</i></p>
 </div>
 
 ---
 
 ## ✨ 功能特性
 
-### 🎯 核心功能
+### 🎯 续火花
 
-- **🔄 自动维护火花标记** - 智能识别需要维护的好友关系，自动发送消息保持火花
-- **👥 多账号管理** - 支持同时管理多个抖音账号，集中控制、独立配置
-- **⏰ 定时任务调度** - 灵活的定时发送策略，支持自定义发送时间窗口
-- **🎨 消息模板系统** - 内置多种消息模板（一言、节日祝福等），支持自定义
-- **📊 可视化仪表盘** - 实时监控账号状态、任务进度、发送历史
+- **🔄 每日自动发送**：在你设置的发送窗口内分批发送，每个目标一天只发一次
+- **👥 好友目标**：在账号页刷新好友列表后勾选；按好友 UID 绑定，好友改昵称后自动跟随
+- **💬 群聊目标**：刷新群列表后勾选，按群会话编号绑定，群改名或有同名群都不会发错
+- **🛡️ 宁可不发，也不重发**：发送前核对聊天对象，对不上就跳过并记录原因；发送结果不确定时标为“待核验”，当天不会自动重发
+- **🎨 消息模板**：自定义模板、一言、节日祝福，可设置多条随机使用
+
+### 🔍 巡查与提醒
+
+- **🚓 发送前巡查**：发送窗口开始前半小时只读检查一遍：登录是否有效、登录的是不是这个账号、目标好友和群是否还在、有没有改名。巡查不打开聊天，也不发消息
+- **🔔 结果推送**：发送失败、巡查发现问题、登录失效时推送到 Telegram、钉钉、企业微信或通用 Webhook，并每天发一份汇总
+- **📋 发送明细**：每个目标的结果按证据分级（服务端确认 / 页面回显 / 仅回执），可单独重试
+
+### 🔑 账号与登录
+
+- **👥 多账号**：集中管理多个抖音账号，每个账号单独配置目标
+- **📱 扫码或 Cookie 登录**：在网页里的登录工作区扫码，或粘贴 Cookie；保存前会在真实浏览器里验证
+- **🪪 身份绑定**：重新登录时核对抖音账号身份，防止把登录态存到别的账号下
+- **🧑‍🤝‍🧑 子用户**：管理员可以添加面板用户，每个用户只能看到分配给自己的抖音账号
 
 ### 🛠️ 技术特性
 
-- **🌐 Web 管理界面** - 现代化的 Web UI，支持移动端访问
-- **🎭 主题切换** - 内置亮色/暗色主题，自适应系统偏好
-- **🔐 扫码登录** - 安全的二维码登录方式，无需密码
-- **🔌 浏览器自动化** - 基于 Playwright 的稳定浏览器控制
-- **🐳 容器化部署** - 开箱即用的 Docker 支持，一键部署
-- **🔄 登录态持久化** - 自动保存登录状态，减少重复登录
-- **📝 完整日志系统** - 详细的操作日志，方便问题追踪
-
-### 🎨 界面特点
-
-- **现代化设计** - 简洁美观的深色模式主界面，炫彩火花渐变效果
-- **响应式布局** - 适配桌面和移动设备
-- **侧边栏导航** - 清晰的功能分区：概览、登录、账号、控制台、日志、设置
-- **实时状态更新** - 账号在线状态、任务执行进度实时显示
-- **交互式控制** - 一键启动/停止任务，批量操作支持
+- **🌐 Web 控制台**：FastAPI + 原生 JavaScript，手机也能用，支持亮色/暗色主题
+- **🔌 浏览器自动化**：基于 Playwright，每个账号使用独立的持久化浏览器配置
+- **🐳 Docker 部署**：一条命令起全部服务，同时支持 x86 和 ARM（Apple Silicon）
+- **🌍 网络回退**：默认直连抖音，直连不通时再走 Mihomo 代理
+- **🔒 账号互斥**：发送、刷新好友/群列表、巡查和登录共用账号锁，不会同时打开同一个账号
 
 ---
 
@@ -75,9 +78,11 @@
 
 ### 前置要求
 
-- Python 3.9 或更高版本
+- Python 3.10 或更高版本（代码使用了 `X | None` 之类的 PEP 604 语法，3.9 会在导入时报错）
+- Node.js 18+ 或 Docker（仅在使用协议发送通道时需要，用于运行 `core/protocol_sender.mjs`）
 - Docker 和 Docker Compose（用于容器部署）
 - 稳定的网络连接
+- 你自己的抖音账号（本项目不附带任何账号、Cookie 或好友数据，首次使用需在面板里扫码登录）
 
 ### 📦 安装部署
 
@@ -85,6 +90,8 @@
 <summary><b>🐳 方式一：Docker 一键部署（推荐）</b></summary>
 
 **适用场景**：服务器部署、生产环境
+
+> **Apple Silicon（M 系列）**：默认 Playwright 基础镜像同时支持 `amd64` 和 `arm64`，无需指定 `platform`。如需设置 `PLAYWRIGHT_BASE_IMAGE` 使用镜像站，请确认所选镜像也提供 `arm64`；这只解决容器镜像架构兼容性，不保证抖音登录流程可用。
 
 ```bash
 # 1. 克隆仓库
@@ -152,11 +159,11 @@ python main.py --web
 
 ### 🎬 使用流程
 
-1. **登录账号** → 进入"登录工作区"，扫码登录抖音账号
-2. **添加好友** → 在"账号管理"中刷新好友列表，选择需要维护火花的好友
-3. **配置任务** → 设置发送时间窗口、消息模板
-4. **启动任务** → 在"概览"页面启动定时任务
-5. **监控运行** → 在"发送控制台"查看实时日志和发送记录
+1. **登录账号** → 在「登录」页扫码或粘贴 Cookie，登录抖音账号
+2. **选择目标** → 在「账号」页刷新好友列表和群列表，勾选需要续火花的好友和群
+3. **配置任务** → 在「设置」里调整发送窗口、消息模板和推送通知
+4. **查看进度** → 「今日」页显示还差几个火花、下一轮发送时间和巡查结果
+5. **处理异常** → 在「发送明细」查看每个目标的结果并单独重试；巡查发现问题时会推送提醒
 
 📖 详细使用教程请查看 [使用文档](docs/usage.md)
 
@@ -166,36 +173,38 @@ python main.py --web
 
 ```
 douyin-sparkflow/
-├── DouYinSparkFlow/          # 核心应用源码
-│   ├── core/                 # 核心功能模块
-│   │   ├── browser.py        # 浏览器控制
-│   │   ├── friends.py        # 好友管理
-│   │   ├── login.py          # 登录处理
-│   │   ├── msg_builder.py    # 消息构建
-│   │   ├── protocol_sender.mjs  # 协议发送
-│   │   └── tasks.py          # 任务调度（核心）
-│   ├── webui/                # Web 界面
-│   │   ├── app.py            # FastAPI 主应用
-│   │   ├── auth.py           # 认证模块
-│   │   ├── ops.py            # 操作接口
-│   │   ├── static/           # 静态资源（CSS/JS）
-│   │   └── templates/        # HTML 模板
-│   ├── utils/                # 工具模块
-│   │   ├── config.py         # 配置管理
-│   │   ├── logger.py         # 日志记录
-│   │   └── hitokoto.py       # 一言 API
-│   ├── scripts/              # 辅助脚本
-│   ├── docs/                 # 文档和截图
-│   ├── main.py               # 主入口
-│   └── login_desktop_server.py  # 登录桌面服务
-├── .github/workflows/       # GitHub Actions 定时任务
-├── proxy/                    # 代理配置
-│   ├── config.example.yaml   # Git 跟踪的安全模板
-│   └── config.yaml           # 本地生成，Git 忽略
-├── docker-compose.yml        # 容器编排配置
-├── .env.example              # 环境变量模板
-├── refresh_proxy.sh          # 代理刷新脚本
-└── README.md                 # 本文件
+├── DouYinSparkFlow/              # 核心应用源码
+│   ├── core/                     # 核心功能模块
+│   │   ├── tasks.py              # 发送任务与调度（核心）
+│   │   ├── streak_state.py       # 每个目标的发送状态与失败分类
+│   │   ├── friends.py            # 好友列表读取
+│   │   ├── friend_identity.py    # 好友 UID 绑定与改名跟随
+│   │   ├── groups.py             # 群列表读取（只读）
+│   │   ├── patrol.py             # 发送前巡查（只读）
+│   │   ├── notifications.py      # 推送事件的去重与汇总
+│   │   ├── identity.py           # 抖音账号身份核对
+│   │   ├── browser.py            # 浏览器、持久化配置与账号锁
+│   │   ├── login.py / cookies.py # 登录与 Cookie 校验
+│   │   ├── msg_builder.py        # 消息内容构建
+│   │   └── protocol_*.{py,mjs}   # 协议发送通道（可选，仅好友）
+│   ├── webui/                    # Web 控制台
+│   │   ├── app.py                # FastAPI 主应用
+│   │   ├── auth.py / users.py    # 登录认证与子用户
+│   │   ├── ops.py                # 运维与概览数据
+│   │   ├── static/               # 静态资源（CSS/JS）
+│   │   └── templates/            # HTML 模板
+│   ├── utils/                    # 配置、日志、推送渠道、一言等
+│   ├── scripts/                  # 定时任务与辅助脚本
+│   ├── tests/                    # 单元测试
+│   ├── main.py                   # 主入口（--web / --doTask / --patrol）
+│   └── login_desktop_server.py   # 登录桌面服务
+├── .github/workflows/            # GitHub Actions 测试（只跑测试，不发送）
+├── deploy/                       # 一键部署脚本
+├── docs/                         # 使用文档
+├── proxy/                        # 代理配置模板
+├── docker-compose.yml            # 容器编排配置
+├── .env.example                  # 环境变量模板
+└── README.md                     # 本文件
 ```
 
 ---
@@ -204,10 +213,22 @@ douyin-sparkflow/
 
 ### 🔑 账号管理
 
-- **扫码登录**：使用抖音 APP 扫描二维码完成登录
-- **多账号支持**：可同时管理多个账号，独立配置每个账号的发送策略
-- **登录态保持**：自动保存登录状态，无需频繁重新登录
-- **状态监控**：实时显示账号在线状态和登录有效期
+- **扫码 / Cookie 登录**：在登录工作区用抖音 APP 扫码，或粘贴 Cookie，保存前会验证
+- **多账号支持**：可同时管理多个账号，独立配置每个账号的目标
+- **登录态保持**：每个账号有独立的持久化浏览器配置，无需频繁重新登录
+- **状态监控**：巡查和发送都会检查登录状态，失效时暂停该账号并推送提醒
+
+### 🎯 好友与群聊目标
+
+- **好友**：在「账号」页点「刷新好友列表」后勾选，或每行手动填写一个昵称。勾选的好友会绑定 UID，改昵称后自动跟随
+- **群聊**：点「刷新群列表」后勾选，列表显示为 `群名（会话编号）`。程序按编号找群并在发送前核对，群改名照常发送，有同名群也不会发错
+- **手动填写群名**：也可以不绑定编号，直接填写群名；此时要求群名在列表第一屏里唯一，否则跳过
+- 群聊目标只支持浏览器发送通道，协议发送通道仅用于好友
+
+### 🚓 巡查与推送
+
+- **巡查**：每天发送窗口开始前半小时自动运行，也可以在「账号」页点「立即巡查」。结果显示每个好友和群是「找到 / 缺失 / 已改名」
+- **推送渠道**：在「设置」里配置 Telegram、钉钉、企业微信或通用 Webhook；同一问题每天只推一次，另有每日汇总
 
 ### 📝 消息管理
 
@@ -219,8 +240,8 @@ douyin-sparkflow/
 **发送策略**：
 - 时间窗口设置（如：09:00-22:00）
 - 可配置发送间隔与限速，用于降低操作频率和对消息接收方的打扰；不保证规避平台风控，也不保证账号不会受到平台处理
-- 发送失败自动重试
-- 发送确认机制
+- 发送失败按类别处理：可重试的失败会在窗口内重试，结果不确定的标为“待核验”，不会自动重发
+- 发送确认分级：服务端确认、页面回显、仅回执，在「发送明细」中分别显示
 
 ### ⚙️ 配置说明
 
@@ -375,7 +396,7 @@ server {
 
 #### 安全建议
 
-- ✅ 修改默认管理员密码
+- ✅ 首次访问面板时创建管理员账号，并使用足够强的密码（系统不提供默认密码）
 - ✅ 启用 HTTPS（使用 Let's Encrypt）
 - ✅ 配置防火墙规则
 - ✅ 定期备份 `state/` 和 `usersData.json`
@@ -400,6 +421,12 @@ mode: rule
 
 如果 `PROXY_SUB_URL` 不为空，`refresh_proxy.sh` 会下载订阅并更新本地配置；如果为空，则生成 DIRECT-only 配置。不要在 Git 中提交包含订阅 token 的 `proxy/config.yaml`。首次部署不要跳过初始化步骤直接执行 `docker compose up -d`，否则 Docker 可能把缺失的配置文件创建成目录。
 
+Mihomo 控制接口（9090）需要密码才能访问。`refresh_proxy.sh`（以及 Windows 的 `deploy/install-local.ps1`）第一次运行时会生成一个随机密码，保存在 `state/proxy/controller-secret`，并写入 `proxy/config.yaml` 的 `secret`；之后刷新订阅也会沿用同一个密码。想自己指定时，在 `.env` 中设置 `PROXY_CONTROLLER_SECRET`（只能包含字母、数字和 `. _ ~ -`），再运行一次 `refresh_proxy.sh`。通过 SSH 隧道用 metacubexd 等面板连接控制接口时，需要填写这个密码：
+
+```bash
+cat state/proxy/controller-secret
+```
+
 如果宿主机 Docker Engine 较旧，Web 容器中的 Docker 运维功能可能需要显式指定
 `DOCKER_API_VERSION`。默认留空即可；只有确认宿主机 API 版本后，才在 `.env` 中设置，
 例如 `DOCKER_API_VERSION=1.43`。
@@ -411,9 +438,11 @@ noVNC、Mihomo 代理端口和控制端口默认仅绑定 `127.0.0.1`。远程�
 
 Web 通过 HTTPS 反向代理部署时，可设置 `SPARKFLOW_SESSION_COOKIE_SECURE=1`。
 
-### GitHub Actions 定时任务
+### 持续集成（GitHub Actions）
 
-工作流位于 `.github/workflows/schedule.yml`。在仓库的 `user-data` Environment 中配置 `USER_DATA` Secret 后，可以手动触发或按北京时间 10:00 定时执行一次手动模式发送。工作流会先执行单元测试和网络可达性检查，再处理当天尚未强确认的目标。
+工作流位于 `.github/workflows/tests.yml`，在每次 `push`、`pull_request` 或手动触发时运行：Python 单元测试、字节码编译检查（`compileall`）以及 Node 侧的协议发送器测试（`node --test`）。它**不使用任何 Secret、不启动浏览器、不发送任何消息**，因此 fork 和外部 PR 也能运行同一套检查。
+
+> 早期版本曾包含一个会在 GitHub 上执行真实发送的定时工作流（`.github/workflows/schedule.yml`，依赖 `user-data` 环境里的 `USER_DATA` Secret）。该工作流已在 2026-09 移除：从云端机房 IP 使用账号登录态发消息既不必要，也容易触发平台风控。如果你曾为它配置过 `USER_DATA`，可以删除该 Secret。需要定时发送时，请使用本项目自带的调度（面板里的自动发送窗口 + 容器内的 cron），它运行在你自己的服务器上。
 
 ---
 
@@ -424,7 +453,7 @@ Web 通过 HTTPS 反向代理部署时，可设置 `SPARKFLOW_SESSION_COOKIE_SEC
 - **浏览器自动化**: Playwright - 跨浏览器自动化
 - **容器化**: Docker + Docker Compose
 - **代理**: Mihomo (Clash Meta)
-- **任务调度**: `scheduler` 容器 + `scripts/cron_runner.py`
+- **任务调度**: `scheduler` 容器 + `scripts/cron_runner.py`（发送窗口与巡查）
 - **模板引擎**: Jinja2
 
 ---
@@ -477,16 +506,16 @@ Web 通过 HTTPS 反向代理部署时，可设置 `SPARKFLOW_SESSION_COOKIE_SEC
 
 ## 📝 更新日志
 
-查看 [CHANGELOG.md](DouYinSparkFlow/CHANGELOG.md) 了解版本更新历史。
+查看 [CHANGELOG.md](CHANGELOG.md) 了解版本更新历史。
 
-**最新更新** (2026-08-27):
-- ✨ 重新设计 Web UI，全新视觉风格
-- 🎨 新增亮色/暗色主题切换
-- 📱 优化移动端响应式布局
-- 🔄 改进好友列表刷新可靠性
-- 🚀 优化一键部署流程
-- 📖 新增截图使用指南
-- 📄 自有代码许可证调整为 PolyForm Noncommercial License 1.0.0，并补充非官方、非商业使用及知识产权说明
+**最近更新**（2026-10）：
+- 💬 支持群聊目标：刷新群列表、勾选后按会话编号绑定，发送前核对，巡查也会检查群
+- 🚓 新增发送前巡查：检查登录状态、账号身份和目标是否还在
+- 🪪 好友按 UID 绑定，改昵称后自动跟随
+- 🔔 新增推送通知：Telegram、钉钉、企业微信、通用 Webhook
+- 🧑‍🤝‍🧑 支持子用户，各自管理分配给自己的抖音账号
+- 📱 登录支持 Cookie，扫码登录保存后在后台验证
+- 🐳 默认镜像同时支持 x86 和 ARM（Apple Silicon）
 
 ---
 

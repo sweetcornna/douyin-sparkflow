@@ -27,10 +27,15 @@ STATE_STREAK_VERIFIED = "streak_verified"
 STATE_FAILED_RETRYABLE = "failed_retryable"
 STATE_FAILED_TERMINAL = "failed_terminal"
 
+TARGET_UID_BINDINGS_KEY = "target_uid_bindings"
+
 CONFIRMED_STATES = {STATE_SEND_CONFIRMED, STATE_STREAK_VERIFIED}
 FAILED_STATES = {STATE_FAILED_RETRYABLE, STATE_FAILED_TERMINAL}
 
 TERMINAL_FAILURE_CATEGORIES = {
+    # The server answered message_send with a refusal code: the message itself
+    # was rejected, so retrying the same target today only repeats the refusal.
+    "send_rejected",
     "protocol_check_message_not_pass",
     "protocol_check_message_self_visible",
     "protocol_user_blocked",
@@ -364,6 +369,24 @@ def target_keys_match(account, left, right):
     return bool(left_ref and right_ref and left_ref == right_ref)
 
 
+def target_uid_binding(account, target_name):
+    """The friend-uid binding of a target (see core.friend_identity), or {}."""
+    bindings = account.get(TARGET_UID_BINDINGS_KEY) if isinstance(account, dict) else None
+    if not isinstance(bindings, dict) or not bindings:
+        return {}
+    wanted = _normalize_key(target_name)
+    if not wanted:
+        return {}
+    for name, binding in bindings.items():
+        if (
+            isinstance(binding, dict)
+            and _normalize_key(name) == wanted
+            and str(binding.get("uid") or "").strip()
+        ):
+            return dict(binding)
+    return {}
+
+
 def resolve_target_ref(account, target_name):
     target_name = normalize_target_name(target_name)
     if not target_name:
@@ -371,6 +394,25 @@ def resolve_target_ref(account, target_name):
 
     refs = _ref_bucket(account)
     cached = str(refs.get(target_name) or "").strip()
+
+    # A target bound to a friend uid always resolves to that identity; nickname
+    # matches in caches must never silently rebind it to someone else.
+    binding = target_uid_binding(account, target_name)
+    if binding:
+        candidate_refs = _refs_from_record(
+            {
+                "secUid": str(binding.get("secUid") or "").strip(),
+                "peerUserId": str(binding.get("uid") or "").strip(),
+            }
+        )
+        ref = candidate_refs[0]
+        _upgrade_related_refs(account, ref, candidate_refs)
+        if cached in candidate_refs or cached.startswith("nickname:"):
+            _upgrade_state_key(account, cached, ref, target_name)
+        elif cached:
+            _detach_legacy_name(account, target_name, cached)
+        refs[target_name] = ref
+        return ref
 
     normalized = _normalize_key(target_name)
     protocol_matches = [
@@ -756,15 +798,15 @@ def _prefer_state(left, right):
             left_time and (right_time is None or left_time > right_time)
         )
     if right_status == STATE_SENT_UNVERIFIED and left_status in FAILED_STATES:
-        # Within one schedule day weak evidence of a send outranks a later
-        # failure, so the target is not sent twice. Evidence from an earlier
-        # day says nothing about today: letting it win left every failure of a
-        # previously delivered target unrecorded, so the retry cap never
-        # counted and the console never showed the failure.
+        # A same-day weak send still blocks a later failure (it must not be
+        # resent), but a weak send from an earlier schedule day must not hide
+        # today's failure.
+        right_sent_time = _state_event_time(right) or right_time
         return bool(
             left_time
-            and not same_day
-            and (right_time is None or left_time > right_time)
+            and right_sent_time
+            and left_time > right_sent_time
+            and not _same_calendar_day(left_time, right_sent_time)
         )
 
     if left_status in FAILED_STATES and right_status == STATE_IN_FLIGHT:
@@ -1076,7 +1118,9 @@ def _receipt_is_strong(receipt):
         bool(receipt.get("ok"))
         and 200 <= http_status < 300
         and call == "message_send"
-        and receipt.get("jsonOk") is True
+        # JSON receipt with zero codes, or the binary protobuf receipt the
+        # creator page gets today (core/im_receipt.py) read as accepted.
+        and (receipt.get("jsonOk") is True or receipt.get("protoOk") is True)
     )
 
 
@@ -1171,11 +1215,11 @@ def _state_for_write(account, target_name, now):
     return state
 
 
-def _store_preferred_state(account, target_name, now, candidate):
+def _store_preferred_state(account, target_name, now, candidate, *, force=False):
     target_ref = resolve_target_ref(account, target_name)
     states = _state_bucket(account)
     existing = states.get(target_ref)
-    if not isinstance(existing, dict) or _prefer_state(candidate, existing):
+    if force or not isinstance(existing, dict) or _prefer_state(candidate, existing):
         candidate["targetRef"] = target_ref
         candidate["displayName"] = normalize_target_name(target_name)
         states[target_ref] = candidate
@@ -1371,6 +1415,7 @@ def mark_failed(
     now=None,
     run_id="",
     strategy="",
+    override_sent_unverified=False,
 ):
     now = _now(now)
     state = _state_for_write(account, target_name, now)
@@ -1383,6 +1428,7 @@ def mark_failed(
         return deepcopy(state)
     if (
         state.get("status") == STATE_SENT_UNVERIFIED
+        and not override_sent_unverified
         and event_time
         and _is_schedule_today(event_time, now)
     ):
@@ -1402,7 +1448,33 @@ def mark_failed(
         }
     )
     candidate.pop("leaseExpiresAt", None)
-    return _store_preferred_state(account, target_name, now, candidate)
+    weak_send_time = _parse_time(state.get("sentAt"), now.tzinfo)
+    if weak_send_time is None:
+        weak_send_time = _state_event_time(state)
+    if state.get("needsVerification") and not _is_schedule_today(
+        weak_send_time, now
+    ):
+        # An old weak-send verification flag can survive claim_in_flight. Once
+        # this attempt becomes today's failure, that stale flag must not make
+        # the failure look like a pending verification of today's send.
+        candidate["needsVerification"] = False
+    elif state.get("status") == STATE_SENT_UNVERIFIED:
+        # The verification flag belonged to an earlier day's weak send. Carrying
+        # it onto today's failure would make the failure look like it needs
+        # manual handling and push it mid-day instead of at the final point.
+        candidate["needsVerification"] = False
+    return _store_preferred_state(
+        account,
+        target_name,
+        now,
+        candidate,
+        force=bool(
+            override_sent_unverified
+            and state.get("status") == STATE_SENT_UNVERIFIED
+            and event_time
+            and _is_schedule_today(event_time, now)
+        ),
+    )
 
 
 def mark_unconfirmed(
@@ -1502,6 +1574,49 @@ def is_sent_unverified(account, target_name, now=None):
     return _is_schedule_today(event_time, now)
 
 
+def state_event_at(state):
+    """When the state's current status was produced, or None if unknown."""
+    state = dict(state or {})
+    status = str(state.get("status") or STATE_PENDING)
+    if status in CONFIRMED_STATES or status == STATE_SENT_UNVERIFIED:
+        return _state_event_time(state)
+    if status in FAILED_STATES:
+        return _parse_time(
+            state.get("lastAttemptAt")
+            or state.get("resetAt")
+            or state.get("updatedAt")
+        )
+    if status == STATE_IN_FLIGHT:
+        return _parse_time(state.get("startedAt") or state.get("updatedAt"))
+    return None
+
+
+def state_is_from_today(state, now=None):
+    """True when the state's current status was produced on today's schedule day.
+
+    Reports and daily statistics only present today's outcome; a status left
+    over from an earlier day means "not sent today".
+    """
+    now = _now(now)
+    status = str(dict(state or {}).get("status") or STATE_PENDING)
+    if status == STATE_PENDING:
+        return False
+    return _is_schedule_today(state_event_at(state), now)
+
+
+def failure_rejection_reason(state, now=None):
+    """Why mark_failed kept ``state`` instead of recording a failure."""
+    now = _now(now)
+    state = dict(state or {})
+    status = str(state.get("status") or STATE_PENDING)
+    event_today = _is_schedule_today(_state_event_time(state), now)
+    if status in CONFIRMED_STATES and event_today:
+        return "already_confirmed_today"
+    if status == STATE_SENT_UNVERIFIED and event_today:
+        return "sent_unverified_today"
+    return "existing_state_preferred"
+
+
 def preflight_account(account, now=None):
     now = _now(now)
     failure = dict(account.get("account_failure") or {})
@@ -1515,6 +1630,16 @@ def preflight_account(account, now=None):
             "healthy": False,
             "category": category,
             "reason": str(failure.get("reason") or category),
+        }
+    # The pre-window account patrol checked the login on the real page; its
+    # failure stands until a later patrol passes or the account logs in again.
+    patrol_failure = account.get("patrol_login_failure")
+    if isinstance(patrol_failure, dict) and patrol_failure:
+        category = str(patrol_failure.get("category") or "login_required")
+        return {
+            "healthy": False,
+            "category": category,
+            "reason": str(patrol_failure.get("reason") or category),
         }
     if account.get("account_identity_mismatch") or account.get("identity_mismatch"):
         return {

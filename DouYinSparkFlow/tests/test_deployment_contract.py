@@ -15,26 +15,44 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertNotIn("/var/log/douyin-sparkflow.log", installer)
 
     def test_github_workflow_is_at_repository_root(self):
-        workflow = REPO_ROOT / ".github" / "workflows" / "schedule.yml"
+        workflow = REPO_ROOT / ".github" / "workflows" / "tests.yml"
         self.assertTrue(workflow.is_file())
-        self.assertFalse((SOURCE_ROOT / ".github" / "workflows" / "schedule.yml").exists())
+        self.assertFalse((SOURCE_ROOT / ".github" / "workflows" / "tests.yml").exists())
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("working-directory: DouYinSparkFlow", text)
-        self.assertIn("SPARKFLOW_BROWSER_PROFILE_ROOT", text)
-        self.assertIn("SPARKFLOW_MANUAL_RUN", text)
         self.assertIn('USER_DATA: "[]"', text)
-        self.assertIn("run_task:", text)
-        self.assertGreaterEqual(text.count("github.event_name == 'schedule' || inputs.run_task"), 2)
-        self.assertIn("path: DouYinSparkFlow/logs/", text)
+        self.assertIn("python -m unittest discover -s tests", text)
+        self.assertIn("node --test DouYinSparkFlow/tests/test_protocol_sender_helpers.mjs", text)
 
     def test_github_actions_are_pinned_to_commit_shas(self):
         import re
 
-        workflow = (REPO_ROOT / ".github" / "workflows" / "schedule.yml").read_text(encoding="utf-8")
-        uses_values = re.findall(r"^\s*-?\s*uses:\s*([^#\s]+)", workflow, flags=re.MULTILINE)
-        self.assertTrue(uses_values)
-        for value in uses_values:
-            self.assertRegex(value, r"^[^@]+@[0-9a-f]{40}$")
+        workflows = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+        self.assertTrue(workflows)
+        for workflow in workflows:
+            uses_values = re.findall(
+                r"^\s*-?\s*uses:\s*([^#\s]+)",
+                workflow.read_text(encoding="utf-8"),
+                flags=re.MULTILINE,
+            )
+            self.assertTrue(uses_values, workflow.name)
+            for value in uses_values:
+                with self.subTest(workflow=workflow.name, uses=value):
+                    self.assertRegex(value, r"^[^@]+@[0-9a-f]{40}$")
+
+    def test_ci_never_sends_messages_or_reads_secrets(self):
+        # The repository is public: CI must stay a pure verification surface. A
+        # scheduled workflow used to run the real send task from GitHub runners
+        # with account cookies in a secret, which both duplicated the server's
+        # schedule and sent from a foreign IP.
+        for workflow in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+            text = workflow.read_text(encoding="utf-8")
+            with self.subTest(workflow=workflow.name):
+                self.assertNotIn("secrets.", text)
+                self.assertNotIn("--doTask", text)
+                self.assertNotIn("SPARKFLOW_MANUAL_RUN", text)
+                self.assertNotRegex(text, r"(?m)^\s*schedule:\s*$")
+                self.assertNotIn("path: DouYinSparkFlow/logs/", text)
 
     def test_runtime_config_is_not_tracked_as_the_template(self):
         self.assertTrue((SOURCE_ROOT / "config.example.json").is_file())
@@ -161,6 +179,22 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('"s/security.ubuntu.com/${APT_MIRROR}/g"', dockerfile)
         self.assertIn("APT_MIRROR: ${APT_MIRROR:-mirrors.aliyun.com}", compose)
 
+    def test_playwright_defaults_use_the_multi_architecture_upstream_image(self):
+        upstream = "mcr.microsoft.com/playwright/python:v1.56.0-jammy"
+        mirror = "swr.cn-north-4.myhuaweicloud.com/ddn-k8s/mcr.microsoft.com/playwright/python:v1.56.0-jammy"
+        dockerfile = (SOURCE_ROOT / "Dockerfile.server").read_text(encoding="utf-8")
+        compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn(f"ARG PLAYWRIGHT_BASE_IMAGE={upstream}", dockerfile)
+        self.assertIn(f"PLAYWRIGHT_BASE_IMAGE: ${{PLAYWRIGHT_BASE_IMAGE:-{upstream}}}", compose)
+        self.assertIn(f"PLAYWRIGHT_BASE_IMAGE={upstream}", env_example)
+        self.assertNotIn(mirror, compose)
+        self.assertNotIn(mirror, env_example)
+        self.assertIn("Apple Silicon", readme)
+        self.assertIn("PLAYWRIGHT_BASE_IMAGE", readme)
+
     def test_docker_build_context_excludes_runtime_data(self):
         dockerignore = (SOURCE_ROOT / ".dockerignore").read_text(encoding="utf-8")
         for entry in ("logs/", "config.json", "usersData.json", "webui_settings.json"):
@@ -180,9 +214,9 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('"--no-proxy-server"', server)
         self.assertIn('"/preflight"', server)
         self.assertIn('LOGIN_DESKTOP_PROXY_MODE: ${LOGIN_DESKTOP_PROXY_MODE:-auto}', login_block)
-        dashboard = (SOURCE_ROOT / "webui" / "templates" / "dashboard.html").read_text(encoding="utf-8")
-        self.assertIn('name="douyin_network_mode"', dashboard)
-        self.assertIn('name="douyin_proxy_url"', dashboard)
+        settings_page = (SOURCE_ROOT / "webui" / "templates" / "settings.html").read_text(encoding="utf-8")
+        self.assertIn('name="douyin_network_mode"', settings_page)
+        self.assertIn('name="douyin_proxy_url"', settings_page)
         browser = (SOURCE_ROOT / "core" / "browser.py").read_text(encoding="utf-8")
         self.assertIn("--no-proxy-server", browser)
         self.assertIn("SPARKFLOW_DOUYIN_NETWORK_MODE", browser)

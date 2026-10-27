@@ -16,14 +16,22 @@
 
 | 文件 | 说明 | 大小 |
 |------|------|------|
-| `browser.py` | 浏览器控制和页面操作 | 3.4 KB |
-| `friends.py` | 好友列表管理和刷新逻辑 | 8.8 KB |
-| `login.py` | 登录流程控制 | 2.8 KB |
+| `browser.py` | 浏览器控制和页面操作 | 6.9 KB |
+| `cookies.py` | Cookie 解析、校验与登录态判定 | 6.5 KB |
+| `friends.py` | 好友列表管理和刷新逻辑 | 29.0 KB |
+| `groups.py` | 群消息列表的只读刷新与会话编号采集 | 7.5 KB |
+| `im_receipt.py` | 严格解析协议发送回执，仅接受无歧义的成功 | 10.4 KB |
+| `login.py` | 登录流程控制 | 7.3 KB |
 | `msg_builder.py` | 消息内容构建（一言、祝福等） | 4.5 KB |
-| `protocol_dispatch.py` | 协议分发和路由 | 14.5 KB |
-| `protocol_sender.mjs` | 消息发送协议（Node.js 脚本） | 22.8 KB |
-| `send_state.py` | 统一判定强确认、待核验和当日发送状态 | 1.6 KB |
-| `tasks.py` | **任务调度核心**（定时任务、状态管理） | 109.5 KB |
+| `protocol_dispatch.py` | 协议分发和路由 | 25.5 KB |
+| `protocol_sender.mjs` | 消息发送协议（Node.js 脚本） | 29.2 KB |
+| `send_state.py` | 统一判定强确认、待核验和当日发送状态 | 1.9 KB |
+| `streak_state.py` | 目标状态机、在途租约与失败分类 | 59.1 KB |
+| `tasks.py` | **任务调度核心**（定时任务、状态管理） | 144.3 KB |
+| `patrol.py` | 发送前的账号、好友和群聊目标只读巡查 | 约 35 KB |
+| `unicode_casefold.mjs` | 生成的大小写折叠表（供 `protocol_sender.mjs` 匹配昵称） | 约 0.96 MB |
+
+> 表中大小会随开发变化，仅作规模参考。
 
 ### `webui/` - Web 管理界面
 
@@ -35,6 +43,7 @@
 |------|------|
 | `app.py` | FastAPI 主应用，路由定义 |
 | `auth.py` | 用户认证和会话管理 |
+| `login_guard.py` | 登录失败限流与新密码规则 |
 | `ops.py` | 操作接口（启动/停止任务、刷新好友等） |
 
 #### 前端资源
@@ -42,18 +51,19 @@
 ```
 webui/
 ├── static/              # 静态资源
-│   ├── app.css         # 主题样式（亮色/暗色）
-│   ├── app.js          # 主题切换脚本
+│   ├── app.css         # 设计系统与亮/暗主题
+│   ├── app.js          # 主题、实时刷新、登录工作区、好友选择器等交互
 │   ├── lucide.min.js      # 本地化图标库
-│   ├── lucide-LICENSE.txt # 图标库许可证
-│   ├── styles.css      # 基础样式
-│   └── multiPagePlugins/  # 浏览器扩展插件
+│   └── lucide-LICENSE.txt # 图标库许可证
 └── templates/          # HTML 模板
-    ├── base.html       # 基础布局模板
-    ├── dashboard.html  # 仪表盘（主界面）
-    ├── login.html      # 登录页
-    ├── send_console.html  # 发送控制台
-    └── logs.html       # 日志查看
+    ├── base.html       # 基础布局（左侧导航 / 手机底部标签栏）
+    ├── login.html      # 控制台登录与初始化
+    ├── dashboard.html  # 今日：进度、需处理目标、账号进度
+    ├── send_console.html  # 发送明细：按账号查看目标结果
+    ├── accounts.html   # 账号与目标好友
+    ├── login_workspace.html  # 扫码 / Cookie 登录抖音账号
+    ├── settings.html   # 设置（消息、发送窗口、运维、系统、Web 用户）
+    └── logs.html       # 运行日志
 ```
 
 ### `utils/` - 工具模块
@@ -110,7 +120,7 @@ python main.py --web
 **命令行模式**：
 ```bash
 python main.py
-# 直接运行任务调度
+# 打开交互式菜单（可执行任务、导出 USER_DATA 等）
 ```
 
 **登录桌面服务**：
@@ -132,6 +142,17 @@ docker run -d \
   -p 8787:8787 \
   -v $(pwd):/app \
   douyin-sparkflow:local
+```
+
+---
+
+## 🧪 运行测试
+
+在源码目录中运行 Python 单元测试；`USER_DATA='[]'` 可避免读取本机账号数据。协议发送器的 Node 测试需单独执行：
+
+```bash
+cd DouYinSparkFlow && USER_DATA='[]' python -m unittest discover -s tests
+node --test tests/test_protocol_sender_helpers.mjs
 ```
 
 ---
@@ -176,6 +197,28 @@ docker run -d \
 | `friendListScan` | 好友列表扫描时限、空闲等待和滚动参数 |
 | `persistentBrowserProfiles` | 持久化 Playwright Profile 及 Cookie 同步策略 |
 | `browserSenderAccounts` | 强制使用浏览器发送的账号列表；公开模板默认为空 |
+| `notifications` | 运行结果推送（Telegram / 钉钉 / 企业微信 / 通用 Webhook），默认关闭 |
+
+#### 运行结果推送（`notifications`）
+
+任务失败（账号预检失败、目标当天最终失败或需人工处理、整次运行异常）时即时推送一条合并消息，同一账号、目标、类别每天只推一次；每天推送一条汇总（启用目标数、成功数、失败数与失败明细）：当天所有启用目标都确认成功后立即推送；否则在发送窗口末次兜底运行（每日窗口结束时的 `0 <endHour>` 任务，`SPARKFLOW_FALLBACK_PHASE=1`）后推送，此时仍未确认成功的目标全部计为失败（类别为“当天未发送成功”或其原始失败原因）。发送窗口关闭时，在当天的定时运行后推送。手动运行（非兜底）不推送汇总，只可能推送失败通知。推送只由管理员在 Web 设置页「推送通知」配置，全局一套；设置页只显示脱敏的 Token 与地址，留空保存保持原值，「发送测试消息」使用已保存的配置。
+
+- 去重与汇总状态保存在 `logs/notify_state.json`，重启后同一天不会重复推送。
+- 每个渠道单次请求，超时 10 秒，失败只写日志，不影响续火花任务的执行与运行报告。
+- `useProxy` 为 true 时经 `douyin_proxy_url`（默认 `http://proxy:7890`）发送，适用于服务器直连不可用的渠道（如 Telegram）。
+- 通用 Webhook 以 JSON POST 发送 `title`、`text`、`event`、`date`，可通过 `extraFields` 追加固定字段（不会覆盖上述四项）。
+
+```json
+"notifications": {
+  "enabled": true,
+  "channels": {
+    "telegram": {"enabled": true, "useProxy": true, "botToken": "<BotToken>", "chatId": "<ChatId>"},
+    "dingtalk": {"enabled": false, "useProxy": false, "webhookUrl": "", "secret": ""},
+    "wecom": {"enabled": false, "useProxy": false, "webhookUrl": ""},
+    "webhook": {"enabled": false, "useProxy": false, "url": "", "extraFields": {}}
+  }
+}
+```
 
 ### `usersData.json` - 用户数据
 
